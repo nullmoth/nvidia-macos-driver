@@ -1,3 +1,97 @@
+diff --git a/realmac27/audio/NMXAudio/Info.plist b/realmac27/audio/NMXAudio/Info.plist
+index 99b6fa59326c0b429e5bab8110827f2d4433df62..02d512dd2b4b35c94e0d6e0001a62af2fd1fafc8 100644
+--- a/realmac27/audio/NMXAudio/Info.plist
++++ b/realmac27/audio/NMXAudio/Info.plist
+@@ -2,36 +2,58 @@
+ <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+ <plist version="1.0">
+ <dict>
+-  <key>CFBundleDevelopmentRegion</key><string>en</string>
+-  <key>CFBundleExecutable</key><string>NMXAudio</string>
+-  <key>CFBundleIdentifier</key><string>com.nullmoth.NMXAudio</string>
+-  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+-  <key>CFBundleName</key><string>NMXAudio</string>
+-  <key>CFBundlePackageType</key><string>KEXT</string>
+-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
+-  <key>CFBundleVersion</key><string>1.0.0</string>
+-  <key>IOKitPersonalities</key>
+-  <dict>
+-    <key>HDAudio</key>
+-    <dict>
+-      <key>CFBundleIdentifier</key><string>com.nullmoth.NMXAudio</string>
+-      <key>IOClass</key><string>NMXAudio</string>
+-      <key>IOProviderClass</key><string>IOPCIDevice</string>
+-      <key>IOPCIClassMatch</key><string>0x04030000&amp;0xffff0000</string>
+-      <key>IOProbeScore</key><integer>5000</integer>
+-    </dict>
+-  </dict>
+-  <key>OSBundleLibraries</key>
+-  <dict>
+-    <key>com.apple.iokit.IOAudioFamily</key><string>1.1fc1</string>
+-    <key>com.apple.iokit.IOPCIFamily</key><string>1.0.0</string>
+-    <key>com.apple.iokit.IOACPIFamily</key><string>1.0.0</string>
+-    <key>com.apple.kpi.bsd</key><string>8.0</string>
+-    <key>com.apple.kpi.iokit</key><string>8.0</string>
+-    <key>com.apple.kpi.libkern</key><string>8.0</string>
+-    <key>com.apple.kpi.mach</key><string>8.0</string>
+-    <key>com.apple.kpi.unsupported</key><string>8.0</string>
+-  </dict>
+-  <key>OSBundleRequired</key><string>Root</string>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>en</string>
++	<key>CFBundleExecutable</key>
++	<string>NMXAudio</string>
++	<key>CFBundleIdentifier</key>
++	<string>com.nullmoth.NMXAudio</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundleName</key>
++	<string>NMXAudio</string>
++	<key>CFBundlePackageType</key>
++	<string>KEXT</string>
++	<key>CFBundleShortVersionString</key>
++	<string>1.0.2</string>
++	<key>CFBundleVersion</key>
++	<string>1.0.2</string>
++	<key>IOKitPersonalities</key>
++	<dict>
++		<key>HDAudio</key>
++		<dict>
++			<key>CFBundleIdentifier</key>
++			<string>com.nullmoth.NMXAudio</string>
++			<key>IOClass</key>
++			<string>NMXAudio</string>
++			<key>IOProviderClass</key>
++			<string>IOPCIDevice</string>
++			<key>IOPCIClassMatch</key>
++			<string>0x04030000&amp;0xffff0000</string>
++			<key>IOProbeScore</key>
++			<integer>5000</integer>
++		</dict>
++	</dict>
++	<key>OSBundleLibraries</key>
++	<dict>
++		<key>com.apple.iokit.IOAudioFamily</key>
++		<string>1.1fc1</string>
++		<key>com.apple.iokit.IOPCIFamily</key>
++		<string>1.0.0</string>
++		<key>com.apple.iokit.IOACPIFamily</key>
++		<string>1.0.0</string>
++		<key>com.apple.kpi.bsd</key>
++		<string>8.0</string>
++		<key>com.apple.kpi.iokit</key>
++		<string>8.0</string>
++		<key>com.apple.kpi.libkern</key>
++		<string>8.0</string>
++		<key>com.apple.kpi.mach</key>
++		<string>8.0</string>
++		<key>com.apple.kpi.unsupported</key>
++		<string>8.0</string>
++	</dict>
++	<key>OSBundleRequired</key>
++	<string>Root</string>
+ </dict>
+ </plist>
 diff --git a/realmac27/audio/NMXAudio/build.sh b/realmac27/audio/NMXAudio/build.sh
 index 30cb638529479697d6255af749884b8fd98b1e7a..3db4ff53c0b9240635c72233d0cf7f2c3ed4a48e 100755
 --- a/realmac27/audio/NMXAudio/build.sh
@@ -16,7 +110,7 @@ index 30cb638529479697d6255af749884b8fd98b1e7a..3db4ff53c0b9240635c72233d0cf7f2c
  done
  # the IOKit side, as ccxx.sh compiles NMXGPU's (Kernel.framework headers only, never the FreeBSD tree) plus the sound
 diff --git a/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c b/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
-index b41e26c04d1d369f2fabaeb5280b2dc7032a4f43..aaf87979b47dfd86f2015c7484d1a39a501c16c3 100644
+index b41e26c04d1d369f2fabaeb5280b2dc7032a4f43..8a95f4551be90ab32c4cc2c942667fe4913b1d30 100644
 --- a/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
 +++ b/realmac27/audio/NMXAudio/freebsd-hda/hdaa.c
 @@ -46,6 +46,7 @@
@@ -27,7 +121,7 @@ index b41e26c04d1d369f2fabaeb5280b2dc7032a4f43..aaf87979b47dfd86f2015c7484d1a39a
  
  #define hdaa_lock(devinfo)	mtx_lock((devinfo)->lock)
  #define hdaa_unlock(devinfo)	mtx_unlock((devinfo)->lock)
-@@ -763,6 +764,162 @@ hdaa_eld_handler(struct hdaa_widget *w)
+@@ -763,6 +764,302 @@ hdaa_eld_handler(struct hdaa_widget *w)
  	hdaa_channels_handler(&devinfo->as[w->bindas]);
  }
  
@@ -130,68 +224,223 @@ index b41e26c04d1d369f2fabaeb5280b2dc7032a4f43..aaf87979b47dfd86f2015c7484d1a39a
 +	return status;
 +}
 +
++static void hdaa_chan_formula(struct hdaa_devinfo *devinfo, int asid,
++	char *buf, int buflen);
++
++static bool
++nmx_hda_valid_color(unsigned int color)
++{
++	/* 0 is Unknown, 10-13 are reserved, and 15 is Other in the HDA tables. */
++	return (color >= 1 && color <= 9) || color == 14;
++}
++
++static uint8_t
++nmx_hda_signal_type(uint8_t digital)
++{
++	switch (digital) {
++	case 0:
++		return NMX_AUDIO_SIGNAL_ANALOG;
++	case 0x3:
++		return NMX_AUDIO_SIGNAL_HDMI;
++	case 0x5:
++		return NMX_AUDIO_SIGNAL_DISPLAYPORT;
++	case 0x7:
++		return NMX_AUDIO_SIGNAL_HDMI_DP;
++	default:
++		return digital ? NMX_AUDIO_SIGNAL_DIGITAL : NMX_AUDIO_SIGNAL_UNKNOWN;
++	}
++}
++
++/*
++ * Return the codec identity and exact pin metadata used by this PCM. The
++ * aggregate fields describe only the requested direction and are withheld
++ * when the HDA pins disagree. The full pin list preserves that disagreement
++ * for diagnostics and future consumers.
++ */
 +int
-+nmx_hda_label_role(device_t dev, int direction)
++nmx_hda_pcm_label_metadata(device_t dev, int direction,
++	struct nmx_pcm_label_metadata *metadata)
 +{
 +	struct hdaa_pcm_devinfo *pcm = device_get_ivars(dev);
-+	if (pcm == NULL)
-+		return NMX_AUDIO_ROLE_UNKNOWN;
-+	int index = direction == NMX_DIR_PLAY ? pcm->playas : pcm->recas;
-+	if (index < 0)
-+		return NMX_AUDIO_ROLE_UNKNOWN;
++	struct hdaa_devinfo *info;
++	const char *function_group_name, *suffix = " Audio Function Group";
++	int selected_index, indices[2], selected = -1;
++	unsigned int pin_count = 0;
++	bool role_common = true, color_common = true, digital_common = true;
++	bool have_role = false, have_color = false, have_digital = false;
++	uint8_t role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
++	uint8_t color = 0, digital = 0;
 +
-+	struct hdaa_devinfo *info = pcm->devinfo;
-+	int role = NMX_AUDIO_ROLE_UNKNOWN;
-+	hdaa_lock(info);
-+	const struct hdaa_audio_as *association = &info->as[index];
-+	for (unsigned i = 0; i < nitems(association->pins); ++i) {
-+		if (association->pins[i] <= 0)
-+			continue;
-+		struct hdaa_widget *pin = hdaa_widget_get(info, association->pins[i]);
-+		if (pin == NULL || !pin->enable)
-+			continue;
-+		int candidate;
-+		switch (HDA_CONFIG_DEFAULTCONF_DEVICE(pin->wclass.pin.config)) {
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_LINE_OUT:
-+			candidate = NMX_AUDIO_ROLE_LINE_OUT;
-+			break;
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_SPEAKER:
-+			candidate = NMX_AUDIO_ROLE_SPEAKER;
-+			break;
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_HP_OUT:
-+			candidate = NMX_AUDIO_ROLE_HEADPHONES;
-+			break;
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_SPDIF_OUT:
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_DIGITAL_OTHER_OUT:
-+			candidate = NMX_AUDIO_ROLE_DIGITAL_OUT;
-+			break;
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_LINE_IN:
-+			candidate = NMX_AUDIO_ROLE_LINE_IN;
-+			break;
-+		case HDA_CONFIG_DEFAULTCONF_DEVICE_MIC_IN:
-+			candidate = NMX_AUDIO_ROLE_MICROPHONE;
-+			break;
-+		default:
-+			candidate = NMX_AUDIO_ROLE_UNKNOWN;
-+			break;
++	if (metadata == NULL)
++		return 0;
++	bzero(metadata, sizeof(*metadata));
++	metadata->role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
++	metadata->location = 0xff;
++	metadata->color = 0xff;
++	metadata->signal = NMX_AUDIO_SIGNAL_UNKNOWN;
++	if (pcm == NULL)
++		return 0;
++
++	/* hdaa_probe appends this fixed suffix to the actual codec description. */
++	function_group_name = device_get_desc(device_get_parent(dev));
++	if (function_group_name != NULL) {
++		size_t name_length = strlen(function_group_name);
++		size_t suffix_length = strlen(suffix);
++		if (name_length > suffix_length &&
++		    strcmp(function_group_name + name_length - suffix_length, suffix) == 0) {
++			size_t codec_length = name_length - suffix_length;
++			if (codec_length >= sizeof(metadata->codec_name))
++				codec_length = sizeof(metadata->codec_name) - 1;
++			memcpy(metadata->codec_name, function_group_name, codec_length);
++			metadata->codec_name[codec_length] = '\0';
 +		}
-+		/* A grouped output with different jack roles keeps its combo name. */
-+		if (candidate == NMX_AUDIO_ROLE_UNKNOWN ||
-+		    (role != NMX_AUDIO_ROLE_UNKNOWN && candidate != role)) {
-+			role = NMX_AUDIO_ROLE_UNKNOWN;
-+			break;
-+		}
-+		role = candidate;
 +	}
++
++	selected_index = direction == NMX_DIR_PLAY ? pcm->playas : pcm->recas;
++	if (selected_index < 0)
++		return 0;
++	indices[0] = pcm->playas;
++	indices[1] = pcm->recas;
++	if (indices[0] == selected_index)
++		selected = 0;
++	else if (indices[1] == selected_index)
++		selected = 1;
++	if (selected < 0)
++		return 0;
++
++	info = pcm->devinfo;
++	hdaa_lock(info);
++
++	for (int association_index = 0; association_index < 2; ++association_index) {
++		int index = indices[association_index];
++		if (index < 0 || (association_index == 1 && index == indices[0]))
++			continue;
++		struct hdaa_audio_as *association = &info->as[index];
++		for (unsigned int sequence = 0;
++		    sequence < sizeof(association->pins) / sizeof(association->pins[0]);
++		    ++sequence) {
++			int nid = association->pins[sequence];
++			if (nid <= 0)
++				continue;
++			struct hdaa_widget *pin = hdaa_widget_get(info, nid);
++			if (pin == NULL || !pin->enable)
++				continue;
++
++			uint32_t config = pin->wclass.pin.config;
++			uint8_t pin_role = HDA_CONFIG_DEFAULTCONF_DEVICE(config);
++			if (pin_role == 14)
++				pin_role = NMX_AUDIO_PIN_DEVICE_UNKNOWN;
++			uint8_t pin_digital = HDA_PARAM_AUDIO_WIDGET_CAP_DIGITAL(pin->param.widget_cap) ? 1 : 0;
++			if (metadata->pin_count < NMX_AUDIO_MAX_PIN_METADATA) {
++				struct nmx_audio_pin_metadata *pin_info =
++				    &metadata->pins[metadata->pin_count++];
++				pin_info->node_id = (uint8_t)nid;
++				pin_info->direction = association->dir == HDAA_CTL_OUT ?
++				    NMX_AUDIO_PIN_DIRECTION_OUTPUT : NMX_AUDIO_PIN_DIRECTION_INPUT;
++				pin_info->role = pin_role;
++				pin_info->location = HDA_CONFIG_DEFAULTCONF_LOCATION(config);
++				pin_info->color = HDA_CONFIG_DEFAULTCONF_COLOR(config);
++				pin_info->connector = HDA_CONFIG_DEFAULTCONF_CONNECTION_TYPE(config);
++				pin_info->connectivity = HDA_CONFIG_DEFAULTCONF_CONNECTIVITY(config);
++				pin_info->digital = pin_digital;
++				pin_info->association = HDA_CONFIG_DEFAULTCONF_ASSOCIATION(config);
++				pin_info->sequence = HDA_CONFIG_DEFAULTCONF_SEQUENCE(config);
++			}
++			if (association_index != selected)
++				continue;
++
++			++pin_count;
++			if (!have_role) {
++				role = pin_role;
++				have_role = true;
++			} else if (pin_role == NMX_AUDIO_PIN_DEVICE_UNKNOWN || pin_role != role) {
++				role_common = false;
++			}
++			unsigned int pin_color = HDA_CONFIG_DEFAULTCONF_COLOR(config);
++			if (!nmx_hda_valid_color(pin_color)) {
++				color_common = false;
++			} else if (!have_color) {
++				color = (uint8_t)pin_color;
++				have_color = true;
++			} else if (pin_color != color) {
++				color_common = false;
++			}
++			if (!have_digital) {
++				digital = pin_digital;
++				have_digital = true;
++			} else if (pin_digital != digital) {
++				digital_common = false;
++			}
++		}
++	}
++
++	struct hdaa_audio_as *selected_as = &info->as[selected_index];
++	metadata->direction = selected_as->dir == HDAA_CTL_OUT ?
++	    NMX_AUDIO_PIN_DIRECTION_OUTPUT : NMX_AUDIO_PIN_DIRECTION_INPUT;
++	if (pin_count != 0) {
++		if (role_common && have_role)
++			metadata->role = role;
++		if (selected_as->location > 0 &&
++		    selected_as->location < sizeof(HDA_LOCS) / sizeof(HDA_LOCS[0]) &&
++		    HDA_LOCS[selected_as->location][0] != '0')
++			metadata->location = (uint8_t)selected_as->location;
++		if (color_common && have_color) {
++			metadata->color = color;
++			metadata->color_is_common = 1;
++		}
++		if (digital_common && have_digital)
++			metadata->signal = nmx_hda_signal_type(digital ? selected_as->digital : 0);
++		/* Mixed roles, locations, colors, or analog/digital pins remain explicit
++		 * in metadata but are never promoted to a false aggregate label. */
++	}
++
++	char play_channels[8] = {}, record_channels[8] = {};
++	if (pcm->playas >= 0 && info->as[pcm->playas].num_chans > 0)
++		hdaa_chan_formula(info, pcm->playas, play_channels, sizeof(play_channels));
++	if (pcm->recas >= 0 && info->as[pcm->recas].num_chans > 0)
++		hdaa_chan_formula(info, pcm->recas, record_channels, sizeof(record_channels));
++	if (play_channels[0] != 0 || record_channels[0] != 0) {
++		if (play_channels[0] == 0 && pcm->playas >= 0 &&
++		    info->as[pcm->playas].num_chans > 0)
++			strlcpy(play_channels, "2.0", sizeof(play_channels));
++		else if (record_channels[0] == 0 && pcm->recas >= 0 &&
++		    info->as[pcm->recas].num_chans > 0)
++			strlcpy(record_channels, "2.0", sizeof(record_channels));
++		if (strcmp(play_channels, record_channels) == 0)
++			record_channels[0] = 0;
++	}
++	if (play_channels[0] != 0)
++		strlcpy(metadata->channel_layout, play_channels, sizeof(metadata->channel_layout));
++	if (record_channels[0] != 0) {
++		if (metadata->channel_layout[0] != 0)
++			strlcat(metadata->channel_layout, "/", sizeof(metadata->channel_layout));
++		strlcat(metadata->channel_layout, record_channels, sizeof(metadata->channel_layout));
++	}
++
 +	hdaa_unlock(info);
-+	return role;
++	return metadata->pin_count != 0;
 +}
 +
  /*
   * Pin sense initializer.
   */
+@@ -6921,7 +7218,14 @@ hdaa_chan_formula(struct hdaa_devinfo *devinfo, int asid,
+ 	struct hdaa_audio_as *as;
+ 	int c;
+ 
++	if (buflen <= 0)
++		return;
++	buf[0] = '\0';
++	if (devinfo == NULL || asid < 0 || asid >= devinfo->ascnt)
++		return;
+ 	as = &devinfo->as[asid];
++	if (as->num_chans <= 0)
++		return;
+ 	c = devinfo->chans[as->chans[0]].channels;
+ 	if (c == 1)
+ 		snprintf(buf, buflen, "mono");
 diff --git a/realmac27/audio/NMXAudio/nmx_audio_kext.cpp b/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
-index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb86c1b361b 100644
+index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..2f7fcb3b6b1b0939c1e537482db867333932c18e 100644
 --- a/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
 +++ b/realmac27/audio/NMXAudio/nmx_audio_kext.cpp
 @@ -16,6 +16,8 @@
@@ -203,7 +452,13 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  #include <IOKit/pci/IOPCIDevice.h>
  #include <IOKit/IONVRAM.h>
  #include <libkern/c++/OSData.h>
-@@ -28,9 +30,12 @@
+@@ -25,12 +27,18 @@
+ #include <IOKit/audio/IOAudioLevelControl.h>
+ #include <IOKit/audio/IOAudioToggleControl.h>
+ #include <IOKit/audio/IOAudioDefines.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
  #include <libkern/version.h>
  #include <mach/kmod.h>
  #include <pexpert/pexpert.h>
@@ -216,7 +471,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  
  /* FreeBSD's format and mixer constants the engine needs (sys/soundcard.h); the C side owns everything else */
  #define NMX_AFMT_S16_LE 0x00000010
-@@ -48,6 +53,26 @@ void *devclass_create(const char *name);
+@@ -48,6 +56,165 @@ void *devclass_create(const char *name);
  int devclass_add_driver(void *dc, void *driver, int pass, void **dcp);
  }
  
@@ -227,35 +482,175 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
 +    return nmxAudioText(g_locale, key);
 +}
 +
-+static const char *pcmLabel(struct snddev_info *pcm, int direction)
++static const char *pcmRoleText(uint8_t role)
 +{
-+    switch (nmx_pcm_label_role(pcm, direction)) {
-+    case NMX_AUDIO_ROLE_LINE_OUT: return audioText(NMX_AUDIO_TEXT_LINE_OUT);
-+    case NMX_AUDIO_ROLE_SPEAKER: return audioText(NMX_AUDIO_TEXT_INTERNAL_SPEAKER);
-+    case NMX_AUDIO_ROLE_HEADPHONES: return audioText(NMX_AUDIO_TEXT_HEADPHONES);
-+    case NMX_AUDIO_ROLE_DIGITAL_OUT: return audioText(NMX_AUDIO_TEXT_DIGITAL_OUT);
-+    case NMX_AUDIO_ROLE_LINE_IN: return audioText(NMX_AUDIO_TEXT_LINE_IN);
-+    case NMX_AUDIO_ROLE_MICROPHONE: return audioText(NMX_AUDIO_TEXT_MICROPHONE);
-+    default: return nmx_pcm_name(pcm);
++    switch (role) {
++    case NMX_AUDIO_PIN_DEVICE_LINE_OUT: return audioText(NMX_AUDIO_TEXT_LINE_OUT);
++    case NMX_AUDIO_PIN_DEVICE_SPEAKER: return audioText("speaker");
++    case NMX_AUDIO_PIN_DEVICE_HEADPHONES: return audioText(NMX_AUDIO_TEXT_HEADPHONES);
++    case NMX_AUDIO_PIN_DEVICE_CD: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_CD);
++    case NMX_AUDIO_PIN_DEVICE_SPDIF_OUT: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_OUT);
++    case NMX_AUDIO_PIN_DEVICE_DIGITAL_OUT: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_OUT);
++    case NMX_AUDIO_PIN_DEVICE_MODEM_LINE: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_MODEM_LINE);
++    case NMX_AUDIO_PIN_DEVICE_MODEM_HANDSET: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_MODEM_HANDSET);
++    case NMX_AUDIO_PIN_DEVICE_LINE_IN: return audioText(NMX_AUDIO_TEXT_LINE_IN);
++    case NMX_AUDIO_PIN_DEVICE_AUX: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_AUX);
++    case NMX_AUDIO_PIN_DEVICE_MICROPHONE: return audioText(NMX_AUDIO_TEXT_MICROPHONE);
++    case NMX_AUDIO_PIN_DEVICE_TELEPHONY: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_TELEPHONY);
++    case NMX_AUDIO_PIN_DEVICE_SPDIF_IN: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_IN);
++    case NMX_AUDIO_PIN_DEVICE_DIGITAL_IN: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_IN);
++    case NMX_AUDIO_PIN_DEVICE_OTHER: return audioText(NMX_AUDIO_TEXT_PIN_ROLE_OTHER);
++    default: return nullptr;
 +    }
 +}
++
++static const char *pcmLocationText(uint8_t location)
++{
++    switch (location) {
++    case 1: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_REAR);
++    case 2: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_FRONT);
++    case 3: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_LEFT);
++    case 4: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_RIGHT);
++    case 5: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_TOP);
++    case 6: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_BOTTOM);
++    case 7: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_REAR_PANEL);
++    case 8: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_DRIVE_BAY);
++    case 16: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_INTERNAL);
++    case 23: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_RISER);
++    case 25: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_ONBOARD);
++    case 32: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXTERNAL);
++    case 33: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_REAR);
++    case 34: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_FRONT);
++    case 35: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_LEFT);
++    case 36: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_RIGHT);
++    case 37: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_TOP);
++    case 38: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_EXT_BOTTOM);
++    case 48: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_OTHER);
++    case 55: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_OTHER_BOTTOM);
++    case 56: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_LID_IN);
++    case 57: return audioText(NMX_AUDIO_TEXT_PIN_LOCATION_LID_OUT);
++    default: return nullptr;
++    }
++}
++
++static const char *pcmSignalText(uint8_t signal)
++{
++    switch (signal) {
++    case NMX_AUDIO_SIGNAL_ANALOG: return audioText(NMX_AUDIO_TEXT_PIN_SIGNAL_ANALOG);
++    case NMX_AUDIO_SIGNAL_DIGITAL: return audioText(NMX_AUDIO_TEXT_PIN_SIGNAL_DIGITAL);
++    case NMX_AUDIO_SIGNAL_HDMI: return audioText(NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI);
++    case NMX_AUDIO_SIGNAL_DISPLAYPORT: return audioText(NMX_AUDIO_TEXT_PIN_SIGNAL_DISPLAYPORT);
++    case NMX_AUDIO_SIGNAL_HDMI_DP: return audioText(NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI_DP);
++    default: return nullptr;
++    }
++}
++
++static const char *pcmDirectionText(uint8_t direction)
++{
++    switch (direction) {
++    case NMX_AUDIO_PIN_DIRECTION_INPUT: return audioText(NMX_AUDIO_TEXT_PIN_DIRECTION_INPUT);
++    case NMX_AUDIO_PIN_DIRECTION_OUTPUT: return audioText(NMX_AUDIO_TEXT_PIN_DIRECTION_OUTPUT);
++    default: return nullptr;
++    }
++}
++
++static const char *pcmColorText(uint8_t color)
++{
++    switch (color) {
++    case 1: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_BLACK);
++    case 2: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_GRAY);
++    case 3: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_BLUE);
++    case 4: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_GREEN);
++    case 5: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_RED);
++    case 6: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_ORANGE);
++    case 7: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_YELLOW);
++    case 8: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_PURPLE);
++    case 9: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_PINK);
++    case 14: return audioText(NMX_AUDIO_TEXT_PIN_COLOR_WHITE);
++    default: return nullptr;
++    }
++}
++
++static const char *pcmLabel(struct snddev_info *pcm, int direction,
++    char *buffer, size_t capacity)
++{
++    struct nmx_pcm_label_metadata metadata = {};
++    if (!nmx_pcm_get_label_metadata(pcm, direction, &metadata))
++        return nmx_pcm_name(pcm);
++
++    const char *role = pcmRoleText(metadata.role);
++    const char *signal = role ? nullptr : pcmSignalText(metadata.signal);
++    const char *location = pcmLocationText(metadata.location);
++    const char *directionText = role ? nullptr : pcmDirectionText(metadata.direction);
++    const char *color = metadata.color_is_common ? pcmColorText(metadata.color) : nullptr;
++    char port[96] = {};
++    const char *portName = nmxAudioFormatPortName(g_locale, location,
++        role ? role : signal, directionText, port, sizeof(port)) ? port : nullptr;
++    if (!portName && !color && !metadata.channel_layout[0])
++        return nmx_pcm_name(pcm);
++    if (!nmxAudioFormatPCMName(g_locale, metadata.codec_name, portName, color,
++        metadata.channel_layout, buffer, capacity))
++        return nmx_pcm_name(pcm);
++    return buffer;
++}
++
++static void setPinNumber(OSDictionary *entry, const char *key, uint8_t value)
++{
++    OSNumber *number = OSNumber::withNumber(value, 8);
++    if (number) {
++        entry->setObject(key, number);
++        number->release();
++    }
++}
++
++static void publishPinMetadata(IOAudioDevice *device,
++    const struct nmx_pcm_label_metadata *metadata)
++{
++    if (!device || !metadata || metadata->pin_count == 0)
++        return;
++    OSArray *pins = OSArray::withCapacity(metadata->pin_count);
++    if (!pins)
++        return;
++    for (UInt32 i = 0; i < metadata->pin_count; ++i) {
++        const struct nmx_audio_pin_metadata &pin = metadata->pins[i];
++        OSDictionary *entry = OSDictionary::withCapacity(10);
++        if (!entry)
++            break;
++        setPinNumber(entry, "NodeID", pin.node_id);
++        setPinNumber(entry, "Direction", pin.direction);
++        setPinNumber(entry, "Role", pin.role);
++        setPinNumber(entry, "Location", pin.location);
++        setPinNumber(entry, "Color", pin.color);
++        setPinNumber(entry, "Connector", pin.connector);
++        setPinNumber(entry, "Connectivity", pin.connectivity);
++        setPinNumber(entry, "Digital", pin.digital);
++        setPinNumber(entry, "Association", pin.association);
++        setPinNumber(entry, "Sequence", pin.sequence);
++        pins->setObject(entry);
++        entry->release();
++    }
++    device->setProperty("NMXAudioPinMetadata", pins);
++    pins->release();
++}
++
 +
  /* ---- the engine: one channel (play or record) of one PCM device */
  
  class NMXAudioEngine : public IOAudioEngine {
-@@ -55,6 +80,7 @@ class NMXAudioEngine : public IOAudioEngine {
+@@ -55,6 +222,8 @@ class NMXAudioEngine : public IOAudioEngine {
      struct snddev_info *sc_;
      struct pcm_channel *ch_;
      bool output_;
 +    const char *displayName_ = nullptr;
++    char pcmLabel_[192] = {};
      void *ring_;
      UInt32 ringBytes_, frameBytes_, frames_, lastPtr_;
      UInt32 sampleBits_;
-@@ -64,9 +90,13 @@ class NMXAudioEngine : public IOAudioEngine {
+@@ -64,9 +233,13 @@ class NMXAudioEngine : public IOAudioEngine {
      static IOReturn muteChanged(OSObject *target, IOAudioControl *, SInt32, SInt32 v);
      SInt32 volume_ = 75;
      bool muted_ = false;
-+    UInt32 displayLevels_ = 0x00646464; // master, left, right; bit 24 is mute
++    UInt32 displayLevels_ = 0x00006464; // left, right; bit 16 is mute
 +    void setDisplayLevel(UInt32 shift, UInt32 mask, UInt32 level);
 +    void detachChannel();
  public:
@@ -266,7 +661,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      void free() override;
      UInt32 getCurrentSampleFrame() override;
      IOReturn performAudioEngineStart() override;
-@@ -92,13 +122,14 @@ OSString *NMXAudioEngine::getGlobalUniqueID()
+@@ -92,13 +265,14 @@ OSString *NMXAudioEngine::getGlobalUniqueID()
      return OSString::withCString(id);
  }
  
@@ -282,16 +677,17 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      return true;
  }
  
-@@ -135,7 +166,7 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+@@ -135,7 +309,8 @@ bool NMXAudioEngine::initHardware(IOService *provider)
          return false;
      frames_ = ringBytes_ / frameBytes_;
  
 -    setDescription(nmx_pcm_name(sc_));
-+    setDescription(displayName_ ? displayName_ : pcmLabel(sc_, nmx_chan_dir(ch_)));
++    setDescription(displayName_ ? displayName_ :
++        pcmLabel(sc_, nmx_chan_dir(ch_), pcmLabel_, sizeof(pcmLabel_)));
      IOAudioSampleRate sr = { rate, 0 };
      setSampleRate(&sr);
      setNumSampleFramesPerBuffer(frames_);
-@@ -160,14 +191,22 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+@@ -160,14 +335,24 @@ bool NMXAudioEngine::initHardware(IOService *provider)
      addAudioStream(stream_);
      stream_->release();
  
@@ -313,16 +709,18 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
 +            control->release();
 +        }
 +    };
-+    addLevel(kIOAudioControlChannelIDAll, kIOAudioControlChannelNameAll, displayName_ ? 100 : 75);
 +    if (displayName_) {
-+        addLevel(kIOAudioControlChannelIDDefaultLeft, audioText(NMX_AUDIO_TEXT_LEFT), 100);
-+        addLevel(kIOAudioControlChannelIDDefaultRight, audioText(NMX_AUDIO_TEXT_RIGHT), 100);
++        // CoreAudio derives virtual main volume and balance from the stereo pair.
++        addLevel(kIOAudioControlChannelIDDefaultLeft, kIOAudioControlChannelNameLeft, 100);
++        addLevel(kIOAudioControlChannelIDDefaultRight, kIOAudioControlChannelNameRight, 100);
 +        if (nmx_pcm_mixer_devs(sc_) & (1u << NMX_MIXER_VOLUME))
 +            nmx_pcm_mixer_set(sc_, NMX_MIXER_VOLUME, 100, 100);
++    } else {
++        addLevel(kIOAudioControlChannelIDAll, kIOAudioControlChannelNameAll, 75);
      }
      IOAudioToggleControl *mute = IOAudioToggleControl::createMuteControl(false, kIOAudioControlChannelIDAll,
          kIOAudioControlChannelNameAll, 0, output_ ? kIOAudioControlUsageOutput : kIOAudioControlUsageInput);
-@@ -182,21 +221,48 @@ bool NMXAudioEngine::initHardware(IOService *provider)
+@@ -182,21 +367,50 @@ bool NMXAudioEngine::initHardware(IOService *provider)
      return true;
  }
  
@@ -366,33 +764,35 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
          return kIOReturnBadArgument;
 +    if (e->displayName_) {
 +        const UInt32 channel = control->getChannelID();
-+        if (channel > kIOAudioControlChannelIDDefaultRight || v < 0 || v > 100)
++        if ((channel != kIOAudioControlChannelIDDefaultLeft && channel != kIOAudioControlChannelIDDefaultRight) ||
++            v < 0 || v > 100)
 +            return kIOReturnBadArgument;
-+        e->setDisplayLevel(channel * 8, 0xff, static_cast<UInt32>(v));
++        e->setDisplayLevel(channel == kIOAudioControlChannelIDDefaultLeft ? 0 : 8,
++                           0xff, static_cast<UInt32>(v));
 +        return kIOReturnSuccess;
 +    }
      e->volume_ = v;
      unsigned lvl = e->muted_ ? 0 : (unsigned)v;
      nmx_pcm_mixer_set(e->sc_, e->output_ ? NMX_MIXER_VOLUME : NMX_MIXER_RECLEV, lvl, lvl);
-@@ -208,6 +274,10 @@ IOReturn NMXAudioEngine::muteChanged(OSObject *target, IOAudioControl *, SInt32,
+@@ -208,6 +422,10 @@ IOReturn NMXAudioEngine::muteChanged(OSObject *target, IOAudioControl *, SInt32,
      NMXAudioEngine *e = OSDynamicCast(NMXAudioEngine, target);
      if (e == nullptr)
          return kIOReturnBadArgument;
 +    if (e->displayName_) {
-+        e->setDisplayLevel(24, 1, v != 0);
++        e->setDisplayLevel(16, 1, v != 0);
 +        return kIOReturnSuccess;
 +    }
      e->muted_ = v != 0;
      unsigned lvl = e->muted_ ? 0 : (unsigned)e->volume_;
      nmx_pcm_mixer_set(e->sc_, e->output_ ? NMX_MIXER_VOLUME : NMX_MIXER_RECLEV, lvl, lvl);
-@@ -261,6 +331,16 @@ void NMXAudioEngine::blockDone()
+@@ -261,6 +479,16 @@ void NMXAudioEngine::blockDone()
  IOReturn NMXAudioEngine::clipOutputSamples(const void *mixBuf, void *sampleBuf, UInt32 first, UInt32 n,
                                             const IOAudioStreamFormat *, IOAudioStream *)
  {
 +    if (displayName_) {
 +        using namespace nmx_display_gain;
 +        const UInt32 levels = __atomic_load_n(&displayLevels_, __ATOMIC_RELAXED);
-+        const auto gains = precompute({levels & 0xff, (levels >> 8) & 0xff, (levels >> 16) & 0xff, (levels >> 24) != 0});
++        const auto gains = precompute({levels & 0xff, (levels >> 8) & 0xff, (levels & 0x10000) != 0});
 +        const auto *mix = static_cast<const float *>(mixBuf);
 +        const bool written = sampleBits_ == 32
 +            ? writeStereo(mix, frames_, static_cast<SInt32 *>(sampleBuf), frames_, first, n, gains)
@@ -402,12 +802,21 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      const float *in = (const float *)mixBuf + first * 2;
      UInt32 count = n * 2;
      if (sampleBits_ == 32) {
-@@ -303,9 +383,20 @@ IOReturn NMXAudioEngine::convertInputSamples(const void *sampleBuf, void *destBu
+@@ -281,6 +509,7 @@ IOReturn NMXAudioEngine::clipOutputSamples(const void *mixBuf, void *sampleBuf,
+     return kIOReturnSuccess;
+ }
+ 
++
+ IOReturn NMXAudioEngine::convertInputSamples(const void *sampleBuf, void *destBuf, UInt32 first, UInt32 n,
+                                              const IOAudioStreamFormat *, IOAudioStream *)
+ {
+@@ -303,9 +532,21 @@ IOReturn NMXAudioEngine::convertInputSamples(const void *sampleBuf, void *destBu
  class NMXAudioDevice : public IOAudioDevice {
      OSDeclareDefaultStructors(NMXAudioDevice)
      struct snddev_info *sc_;
 +    struct nmx_display_endpoint display_ {};
 +    bool hasDisplay_ = false;
++    char pcmLabel_[192] = {};
  public:
      struct snddev_info *softc() const { return sc_; }
 -    bool initFor(struct snddev_info *sc) { sc_ = sc; return IOAudioDevice::init(nullptr); }
@@ -424,15 +833,22 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      bool initHardware(IOService *provider) override;
  };
  OSDefineMetaClassAndStructors(NMXAudioDevice, IOAudioDevice)
-@@ -314,14 +405,18 @@ bool NMXAudioDevice::initHardware(IOService *provider)
+@@ -314,14 +555,25 @@ bool NMXAudioDevice::initHardware(IOService *provider)
  {
      if (!IOAudioDevice::initHardware(provider))
          return false;
 -    const char *name = nmx_pcm_name(sc_);
++    int labelDirection = nmx_chan_dir(nmx_pcm_chan(sc_, 0));
 +    const char *name = hasDisplay_ ? (display_.name[0] ? display_.name : audioText(NMX_AUDIO_TEXT_DISPLAY_AUDIO))
-+                                   : pcmLabel(sc_, nmx_chan_dir(nmx_pcm_chan(sc_, 0)));
++                                   : pcmLabel(sc_, labelDirection,
++                                       pcmLabel_, sizeof(pcmLabel_));
      setDeviceName(name);
      setDeviceShortName(name);
++    if (!hasDisplay_) {
++        struct nmx_pcm_label_metadata metadata = {};
++        if (nmx_pcm_get_label_metadata(sc_, labelDirection, &metadata))
++            publishPinMetadata(this, &metadata);
++    }
      setManufacturerName("NullMoth");
 +    if (hasDisplay_)
 +        setDeviceTransportType(display_.connector == 1 ? kIOAudioDeviceTransportTypeDisplayPort : kIOAudioDeviceTransportTypeHdmi);
@@ -445,7 +861,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
              engines++;
          if (e)
              e->release();
-@@ -336,19 +431,39 @@ class NMXAudio : public IOService {
+@@ -336,19 +588,40 @@ class NMXAudio : public IOService {
      IOPCIDevice *pci_;
      void *dev_;
      volatile int attach_;
@@ -468,6 +884,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      bool start(IOService *provider) override;
      void stop(IOService *provider) override;
      IOReturn setPowerState(unsigned long state, IOService *device) override;
++    void systemWillShutdown(IOOptionBits spec) override;
 +    void trackDisplay(struct snddev_info *sc);
 +    void forgetDisplay(struct snddev_info *sc);
  };
@@ -486,7 +903,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  
  static bool enabled()
  {
-@@ -384,20 +499,21 @@ bool NMXAudio::start(IOService *provider)
+@@ -384,20 +657,24 @@ bool NMXAudio::start(IOService *provider)
      IOPCIDevice *pci = OSDynamicCast(IOPCIDevice, provider);
      if (pci == nullptr || g_lock == nullptr || !IOService::start(provider))
          return false;
@@ -494,8 +911,12 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
 +    IORecursiveLockLock(g_lock);
      if (!g_started) {
          int err = nmx_port_start();
-         if (err == 0)
+-        if (err == 0)
++        if (err == 0) {
              err = register_drivers();
++            if (err)
++                nmx_port_stop();
++        }
          if (err) {
 -            IOLockUnlock(g_lock);
 +            IORecursiveLockUnlock(g_lock);
@@ -511,7 +932,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      pci->setMemoryEnable(true);
      pci->setBusMasterEnable(true);
      pci_ = pci;
-@@ -432,6 +548,31 @@ static IODTNVRAM *nmx_nvram()
+@@ -432,6 +709,31 @@ static IODTNVRAM *nmx_nvram()
      return n;
  }
  
@@ -543,16 +964,22 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  static bool nmx_marker_set()
  {
      IODTNVRAM *n = nmx_nvram();
-@@ -474,7 +615,7 @@ static int g_guard;     /* 0 = not checked this boot, 1 = armed by this boot, -1
+@@ -474,7 +776,13 @@ static int g_guard;     /* 0 = not checked this boot, 1 = armed by this boot, -1
  void NMXAudio::attachThread(void *arg, wait_result_t)
  {
      NMXAudio *self = (NMXAudio *)arg;
 -    IOLockLock(g_lock);
 +    IORecursiveLockLock(g_lock);
++    if (self->displayStopping_) {
++        IORecursiveLockUnlock(g_lock);
++        self->attach_ = -1;
++        self->release();
++        return;
++    }
      if (g_guard == 0) {
          if (nmx_marker_set()) {
              g_guard = -1;
-@@ -485,17 +626,19 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+@@ -485,17 +793,19 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
          }
      }
      if (g_guard < 0) {
@@ -574,7 +1001,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      if (self->dev_ == nullptr) {
          IOLog("NMXAudio: no driver took %04x:%04x\n", self->pci_->configRead16(kIOPCIConfigVendorID),
                self->pci_->configRead16(kIOPCIConfigDeviceID));
-@@ -509,6 +652,7 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+@@ -509,6 +819,7 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
          self->pci_->joinPMtree(self);
          self->registerPowerDriver(self, states, 2);
          self->registerService();
@@ -582,7 +1009,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
          self->attach_ = 1;
      }
      /* the guard comes off once audio has run for two minutes (the first controller's thread does it) */
-@@ -521,24 +665,125 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
+@@ -521,24 +832,125 @@ void NMXAudio::attachThread(void *arg, wait_result_t)
      self->release();
  }
  
@@ -719,7 +1146,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  }
  
  extern "C" void nmx_audio_diag_publish(const char *text)
-@@ -547,20 +792,19 @@ extern "C" void nmx_audio_diag_publish(const char *text)
+@@ -547,20 +959,19 @@ extern "C" void nmx_audio_diag_publish(const char *text)
          g_attaching->setProperty("nmx-hda-diag", text);
  }
  
@@ -750,13 +1177,17 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  }
  
  extern "C" void nmx_audio_block_done(void *engine, struct pcm_channel *)
-@@ -574,18 +818,38 @@ void NMXAudio::stop(IOService *provider)
-         IOSleep(100);
-     if (attach_ == 1)
-         PMstop();
+@@ -570,25 +981,55 @@ extern "C" void nmx_audio_block_done(void *engine, struct pcm_channel *)
+ 
+ void NMXAudio::stop(IOService *provider)
+ {
 +    IORecursiveLockLock(g_lock);
 +    displayStopping_ = true;
 +    IORecursiveLockUnlock(g_lock);
+     for (int i = 0; attach_ == 0 && i < 600; i++)
+         IOSleep(100);
+     if (attach_ == 1)
+         PMstop();
 +    if (displayTimer_) {
 +        displayTimer_->cancelTimeout();
 +        displayLoop_->removeEventSource(displayTimer_);
@@ -789,7 +1220,20 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      return kIOPMAckImplied;
  }
  
-@@ -596,9 +860,10 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *ki, void *data);
++void NMXAudio::systemWillShutdown(IOOptionBits spec)
++{
++    IORecursiveLockLock(g_lock);
++    displayStopping_ = true;
++    if (dev_)
++        nmx_port_shutdown(dev_);
++    IORecursiveLockUnlock(g_lock);
++    IOService::systemWillShutdown(spec);
++}
++
+ extern "C" {
+ kern_return_t nmx_audio_kmod_start(kmod_info_t *ki, void *data);
+ kern_return_t nmx_audio_kmod_stop(kmod_info_t *ki, void *data);
+@@ -596,9 +1037,10 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *ki, void *data);
  
  kern_return_t nmx_audio_kmod_start(kmod_info_t *, void *)
  {
@@ -802,7 +1246,7 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
  }
  
  kern_return_t nmx_audio_kmod_stop(kmod_info_t *, void *)
-@@ -607,8 +872,10 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *, void *)
+@@ -607,15 +1049,17 @@ kern_return_t nmx_audio_kmod_stop(kmod_info_t *, void *)
          nmx_port_stop();
      if (g_devices)
          g_devices->release();
@@ -814,6 +1258,14 @@ index 508fe00b93521e4754f54ea4b60f3fd27049f7eb..40af67f66f91329ece714872a80ccfb8
      return KERN_SUCCESS;
  }
  
+ extern "C" {
+ kern_return_t _start(kmod_info_t *ki, void *data);
+ kern_return_t _stop(kmod_info_t *ki, void *data);
+-KMOD_EXPLICIT_DECL(com.nullmoth.NMXAudio, "1.0.0", _start, _stop)
++KMOD_EXPLICIT_DECL(com.nullmoth.NMXAudio, "1.0.2", _start, _stop)
+ __private_extern__ kmod_start_func_t *_realmain = nmx_audio_kmod_start;
+ __private_extern__ kmod_stop_func_t *_antimain = nmx_audio_kmod_stop;
+ }
 diff --git a/realmac27/audio/NMXAudio/nmx_display_eld.c b/realmac27/audio/NMXAudio/nmx_display_eld.c
 new file mode 100644
 index 0000000000000000000000000000000000000000..2b44a3b38378c4e0ad41b975a6f314ec6ff84d75
@@ -934,7 +1386,7 @@ index 0000000000000000000000000000000000000000..2b44a3b38378c4e0ad41b975a6f314ec
 +    return true;
 +}
 diff --git a/realmac27/audio/NMXAudio/nmx_pcm.c b/realmac27/audio/NMXAudio/nmx_pcm.c
-index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..266d391767606783d52ac92462fba71cc030c04a 100644
+index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..c2901d161bc9c421f5c085c972421f2265f15e04 100644
 --- a/realmac27/audio/NMXAudio/nmx_pcm.c
 +++ b/realmac27/audio/NMXAudio/nmx_pcm.c
 @@ -25,6 +25,7 @@ struct pcm_channel {
@@ -970,7 +1422,7 @@ index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..266d391767606783d52ac92462fba71c
  }
  
  int snd_setup_intr(device_t dev, struct resource *res, int flags, driver_intr_t hand, void *param, void **cookiep)
-@@ -337,12 +343,37 @@ int nmx_chan_stop(struct pcm_channel *c)
+@@ -337,12 +343,41 @@ int nmx_chan_stop(struct pcm_channel *c)
  }
  
  uint32_t nmx_chan_getptr(struct pcm_channel *c) { return CHANNEL_GETPTR(c->obj, c->data); }
@@ -994,16 +1446,20 @@ index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..266d391767606783d52ac92462fba71c
  const char *nmx_pcm_name(struct snddev_info *sc) { return device_get_desc(sc->dev); }
  
 +int nmx_hda_display_endpoint(device_t dev, struct nmx_display_endpoint *endpoint);
-+int nmx_hda_label_role(device_t dev, int direction);
++int nmx_hda_pcm_label_metadata(device_t dev, int direction,
++	struct nmx_pcm_label_metadata *metadata);
 +
 +int nmx_pcm_display_endpoint(struct snddev_info *sc, struct nmx_display_endpoint *endpoint)
 +{
 +	return nmx_hda_display_endpoint(sc->dev, endpoint);
 +}
 +
-+int nmx_pcm_label_role(struct snddev_info *sc, int direction)
++int nmx_pcm_get_label_metadata(struct snddev_info *sc, int direction,
++	struct nmx_pcm_label_metadata *metadata)
 +{
-+	return nmx_hda_label_role(sc->dev, direction);
++	if (sc == NULL || metadata == NULL)
++		return 0;
++	return nmx_hda_pcm_label_metadata(sc->dev, direction, metadata);
 +}
 +
  static int child_index(device_t dev)
@@ -1011,10 +1467,10 @@ index 139a4f281435190d371a5b1dc8f98a6aa50e52b0..266d391767606783d52ac92462fba71c
  	device_t *kids = NULL;
 diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h b/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..efda9f4c032706dc7ccaffe9cbc2886c01baaf9d
+index 0000000000000000000000000000000000000000..2181529585da912d22e2935061d646c79b737c80
 --- /dev/null
 +++ b/realmac27/audio/NMXAudio/xnuinc/nmx_audio_locale.h
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,289 @@
 +/* Original NMXAudio localization helper. No AppleHDA or SimpleHDA strings/code. */
 +#ifndef NMX_AUDIO_LOCALE_H
 +#define NMX_AUDIO_LOCALE_H
@@ -1048,6 +1504,59 @@ index 0000000000000000000000000000000000000000..efda9f4c032706dc7ccaffe9cbc2886c
 +#define NMX_AUDIO_TEXT_RIGHT "right"
 +#define NMX_AUDIO_TEXT_REAR_ANALOG "rear_analog"
 +#define NMX_AUDIO_TEXT_FRONT_ANALOG "front_analog"
++#define NMX_AUDIO_TEXT_PIN_ROLE_CD "pin_role_cd"
++#define NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_OUT "pin_role_spdif_out"
++#define NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_OUT "pin_role_digital_out"
++#define NMX_AUDIO_TEXT_PIN_ROLE_MODEM_LINE "pin_role_modem_line"
++#define NMX_AUDIO_TEXT_PIN_ROLE_MODEM_HANDSET "pin_role_modem_handset"
++#define NMX_AUDIO_TEXT_PIN_ROLE_AUX "pin_role_aux"
++#define NMX_AUDIO_TEXT_PIN_ROLE_TELEPHONY "pin_role_telephony"
++#define NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_IN "pin_role_spdif_in"
++#define NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_IN "pin_role_digital_in"
++#define NMX_AUDIO_TEXT_PIN_ROLE_OTHER "pin_role_other"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_REAR "pin_location_rear"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_FRONT "pin_location_front"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_LEFT "pin_location_left"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_RIGHT "pin_location_right"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_TOP "pin_location_top"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_BOTTOM "pin_location_bottom"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_REAR_PANEL "pin_location_rear_panel"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_DRIVE_BAY "pin_location_drive_bay"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_INTERNAL "pin_location_internal"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_RISER "pin_location_riser"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_ONBOARD "pin_location_onboard"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXTERNAL "pin_location_external"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_REAR "pin_location_ext_rear"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_FRONT "pin_location_ext_front"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_LEFT "pin_location_ext_left"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_RIGHT "pin_location_ext_right"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_TOP "pin_location_ext_top"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_EXT_BOTTOM "pin_location_ext_bottom"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_OTHER "pin_location_other"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_OTHER_BOTTOM "pin_location_other_bottom"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_LID_IN "pin_location_lid_in"
++#define NMX_AUDIO_TEXT_PIN_LOCATION_LID_OUT "pin_location_lid_out"
++#define NMX_AUDIO_TEXT_PIN_SIGNAL_ANALOG "pin_signal_analog"
++#define NMX_AUDIO_TEXT_PIN_SIGNAL_DIGITAL "pin_signal_digital"
++#define NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI "pin_signal_hdmi"
++#define NMX_AUDIO_TEXT_PIN_SIGNAL_DISPLAYPORT "pin_signal_displayport"
++#define NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI_DP "pin_signal_hdmi_dp"
++#define NMX_AUDIO_TEXT_PIN_DIRECTION_INPUT "pin_direction_input"
++#define NMX_AUDIO_TEXT_PIN_DIRECTION_OUTPUT "pin_direction_output"
++#define NMX_AUDIO_TEXT_PIN_COLOR_BLACK "pin_color_black"
++#define NMX_AUDIO_TEXT_PIN_COLOR_GRAY "pin_color_gray"
++#define NMX_AUDIO_TEXT_PIN_COLOR_BLUE "pin_color_blue"
++#define NMX_AUDIO_TEXT_PIN_COLOR_GREEN "pin_color_green"
++#define NMX_AUDIO_TEXT_PIN_COLOR_RED "pin_color_red"
++#define NMX_AUDIO_TEXT_PIN_COLOR_ORANGE "pin_color_orange"
++#define NMX_AUDIO_TEXT_PIN_COLOR_YELLOW "pin_color_yellow"
++#define NMX_AUDIO_TEXT_PIN_COLOR_PURPLE "pin_color_purple"
++#define NMX_AUDIO_TEXT_PIN_COLOR_PINK "pin_color_pink"
++#define NMX_AUDIO_TEXT_PIN_COLOR_WHITE "pin_color_white"
++#define NMX_AUDIO_TEXT_NAME_OPEN "name_open"
++#define NMX_AUDIO_TEXT_NAME_CLOSE "name_close"
++#define NMX_AUDIO_TEXT_NAME_SEPARATOR "name_separator"
++#define NMX_AUDIO_TEXT_NAME_WORD_SEPARATOR "name_word_separator"
 +
 +/* Accepts locale strings such as "en-US:0" from prev-lang:kbd. */
 +static inline NMXAudioLocaleCode nmxAudioLocale(const char *locale) {
@@ -1108,7 +1617,61 @@ index 0000000000000000000000000000000000000000..efda9f4c032706dc7ccaffe9cbc2886c
 +        { NMX_AUDIO_TEXT_LEFT, { "Left", "左", "左", "左", "왼쪽", "Gauche", "Links", "Izquierda" } },
 +        { NMX_AUDIO_TEXT_RIGHT, { "Right", "右", "右", "右", "오른쪽", "Droite", "Rechts", "Derecha" } },
 +        { NMX_AUDIO_TEXT_REAR_ANALOG, { "Rear Analog", "后置模拟", "後置類比", "リアアナログ", "후면 아날로그", "Analogique arrière", "Analog hinten", "Analógico trasero" } },
-+        { NMX_AUDIO_TEXT_FRONT_ANALOG, { "Front Analog", "前置模拟", "前置類比", "フロントアナログ", "전면 아날로그", "Analogique avant", "Analog vorn", "Analógico delantero" } }
++        { NMX_AUDIO_TEXT_FRONT_ANALOG, { "Front Analog", "前置模拟", "前置類比", "フロントアナログ", "전면 아날로그", "Analogique avant", "Analog vorn", "Analógico delantero" } },
++        { "speaker", { "Speaker", "扬声器", "揚聲器", "スピーカー", "스피커", "Haut-parleur", "Lautsprecher", "Altavoz" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_CD, { "CD", "CD", "CD", "CD", "CD", "CD", "CD", "CD" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_OUT, { "S/PDIF Out", "S/PDIF 输出", "S/PDIF 輸出", "S/PDIF出力", "S/PDIF 출력", "Sortie S/PDIF", "S/PDIF-Ausgang", "Salida S/PDIF" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_OUT, { "Digital Out", "数字输出", "數位輸出", "デジタル出力", "디지털 출력", "Sortie numérique", "Digitalausgang", "Salida digital" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_MODEM_LINE, { "Modem Line", "调制解调器线路", "數據機線路", "モデム回線", "모뎀 회선", "Ligne modem", "Modemleitung", "Línea de módem" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_MODEM_HANDSET, { "Modem Handset", "调制解调器听筒", "數據機話筒", "モデム受話器", "모뎀 송수화기", "Combiné modem", "Modemhörer", "Auricular de módem" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_AUX, { "Auxiliary", "辅助", "輔助", "補助", "보조", "Auxiliaire", "Zusatz", "Auxiliar" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_TELEPHONY, { "Telephony", "电话音频", "電話音訊", "テレフォニー", "전화 오디오", "Téléphonie", "Telefonie", "Telefonía" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_SPDIF_IN, { "S/PDIF In", "S/PDIF 输入", "S/PDIF 輸入", "S/PDIF入力", "S/PDIF 입력", "Entrée S/PDIF", "S/PDIF-Eingang", "Entrada S/PDIF" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_DIGITAL_IN, { "Digital In", "数字输入", "數位輸入", "デジタル入力", "디지털 입력", "Entrée numérique", "Digitaleingang", "Entrada digital" } },
++        { NMX_AUDIO_TEXT_PIN_ROLE_OTHER, { "Other", "其他", "其他", "その他", "기타", "Autre", "Sonstiges", "Otro" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_REAR, { "Rear", "后置", "後置", "リア", "후면", "Arrière", "Hinten", "Trasero" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_FRONT, { "Front", "前置", "前置", "フロント", "전면", "Avant", "Vorn", "Delantero" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_LEFT, { "Left", "左侧", "左側", "左", "왼쪽", "Gauche", "Links", "Izquierdo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_RIGHT, { "Right", "右侧", "右側", "右", "오른쪽", "Droite", "Rechts", "Derecho" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_TOP, { "Top", "顶部", "頂部", "上部", "위쪽", "Haut", "Oben", "Superior" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_BOTTOM, { "Bottom", "底部", "底部", "下部", "아래쪽", "Bas", "Unten", "Inferior" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_REAR_PANEL, { "Rear Panel", "后面板", "後面板", "背面パネル", "후면 패널", "Panneau arrière", "Rückseite", "Panel trasero" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_DRIVE_BAY, { "Drive Bay", "驱动器托架", "磁碟機槽", "ドライブベイ", "드라이브 베이", "Baie de lecteur", "Laufwerksschacht", "Bahía de unidad" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_INTERNAL, { "Internal", "内部", "內部", "内部", "내부", "Interne", "Intern", "Interno" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_RISER, { "Riser", "转接卡", "轉接卡", "ライザー", "라이저", "Carte riser", "Riser", "Elevador" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_ONBOARD, { "Onboard", "板载", "板載", "オンボード", "온보드", "Intégré", "Onboard", "Integrado" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXTERNAL, { "External", "外接", "外接", "外部", "외부", "Externe", "Extern", "Externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_REAR, { "External Rear", "外接后置", "外接後置", "外部リア", "외부 후면", "Arrière externe", "Extern hinten", "Trasero externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_FRONT, { "External Front", "外接前置", "外接前置", "外部フロント", "외부 전면", "Avant externe", "Extern vorn", "Delantero externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_LEFT, { "External Left", "外接左侧", "外接左側", "外部左", "외부 왼쪽", "Gauche externe", "Extern links", "Izquierdo externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_RIGHT, { "External Right", "外接右侧", "外接右側", "外部右", "외부 오른쪽", "Droite externe", "Extern rechts", "Derecho externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_TOP, { "External Top", "外接顶部", "外接頂部", "外部上部", "외부 위쪽", "Haut externe", "Extern oben", "Superior externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_EXT_BOTTOM, { "External Bottom", "外接底部", "外接底部", "外部下部", "외부 아래쪽", "Bas externe", "Extern unten", "Inferior externo" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_OTHER, { "Other", "其他位置", "其他位置", "その他の位置", "기타 위치", "Autre emplacement", "Anderer Ort", "Otra ubicación" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_OTHER_BOTTOM, { "Other Bottom", "其他底部位置", "其他底部位置", "その他の下部", "기타 아래쪽", "Autre bas", "Anderer unterer Ort", "Otra ubicación inferior" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_LID_IN, { "Lid In", "机盖内侧", "機蓋內側", "蓋の内側", "덮개 안쪽", "Intérieur du capot", "Deckel innen", "Interior de tapa" } },
++        { NMX_AUDIO_TEXT_PIN_LOCATION_LID_OUT, { "Lid Out", "机盖外侧", "機蓋外側", "蓋の外側", "덮개 바깥쪽", "Extérieur du capot", "Deckel außen", "Exterior de tapa" } },
++        { NMX_AUDIO_TEXT_PIN_SIGNAL_ANALOG, { "Analog", "模拟", "類比", "アナログ", "아날로그", "Analogique", "Analog", "Analógico" } },
++        { NMX_AUDIO_TEXT_PIN_SIGNAL_DIGITAL, { "Digital", "数字", "數位", "デジタル", "디지털", "Numérique", "Digital", "Digital" } },
++        { NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI, { "HDMI", "HDMI", "HDMI", "HDMI", "HDMI", "HDMI", "HDMI", "HDMI" } },
++        { NMX_AUDIO_TEXT_PIN_SIGNAL_DISPLAYPORT, { "DisplayPort", "DisplayPort", "DisplayPort", "DisplayPort", "DisplayPort", "DisplayPort", "DisplayPort", "DisplayPort" } },
++        { NMX_AUDIO_TEXT_PIN_SIGNAL_HDMI_DP, { "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort", "HDMI/DisplayPort" } },
++        { NMX_AUDIO_TEXT_PIN_DIRECTION_INPUT, { "Input", "输入", "輸入", "入力", "입력", "Entrée", "Eingang", "Entrada" } },
++        { NMX_AUDIO_TEXT_PIN_DIRECTION_OUTPUT, { "Output", "输出", "輸出", "出力", "출력", "Sortie", "Ausgang", "Salida" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_BLACK, { "Black", "黑色", "黑色", "黒", "검정", "Noir", "Schwarz", "Negro" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_GRAY, { "Gray", "灰色", "灰色", "灰色", "회색", "Gris", "Grau", "Gris" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_BLUE, { "Blue", "蓝色", "藍色", "青", "파랑", "Bleu", "Blau", "Azul" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_GREEN, { "Green", "绿色", "綠色", "緑", "녹색", "Vert", "Grün", "Verde" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_RED, { "Red", "红色", "紅色", "赤", "빨강", "Rouge", "Rot", "Rojo" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_ORANGE, { "Orange", "橙色", "橙色", "オレンジ", "주황", "Orange", "Orange", "Naranja" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_YELLOW, { "Yellow", "黄色", "黃色", "黄色", "노랑", "Jaune", "Gelb", "Amarillo" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_PURPLE, { "Purple", "紫色", "紫色", "紫", "보라", "Violet", "Lila", "Morado" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_PINK, { "Pink", "粉色", "粉紅色", "ピンク", "분홍", "Rose", "Rosa", "Rosa" } },
++        { NMX_AUDIO_TEXT_PIN_COLOR_WHITE, { "White", "白色", "白色", "白", "흰색", "Blanc", "Weiß", "Blanco" } },
++        { NMX_AUDIO_TEXT_NAME_OPEN, { " (", "（", "（", "（", "（", " (", " (", " (" } },
++        { NMX_AUDIO_TEXT_NAME_CLOSE, { ")", "）", "）", "）", "）", ")", ")", ")" } },
++        { NMX_AUDIO_TEXT_NAME_SEPARATOR, { ", ", "，", "，", "、", ", ", ", ", ", ", ", " } },
++        { NMX_AUDIO_TEXT_NAME_WORD_SEPARATOR, { " ", "", "", "", "", " ", " ", " " } }
 +    };
 +    size_t i;
 +    if (!key) return (const char *)0;
@@ -1116,6 +1679,84 @@ index 0000000000000000000000000000000000000000..efda9f4c032706dc7ccaffe9cbc2886c
 +    for (i = 0; i < sizeof(entries) / sizeof(entries[0]); ++i)
 +        if (strcmp(key, entries[i].key) == 0) return entries[i].text[(unsigned)locale];
 +    return key;
++}
++
++static inline int nmxAudioAppend(char *out, size_t capacity, size_t *used, const char *text)
++{
++    size_t length;
++    if (!out || !used || !text || capacity == 0 || *used >= capacity)
++        return 0;
++    length = strlen(text);
++    if (length >= capacity - *used)
++        return 0;
++    memcpy(out + *used, text, length);
++    *used += length;
++    out[*used] = '\0';
++    return 1;
++}
++
++static inline int nmxAudioFormatPortName(NMXAudioLocaleCode locale,
++    const char *location, const char *endpoint, const char *direction,
++    char *out, size_t capacity)
++{
++    const char *parts[3] = { location, endpoint, direction };
++    const char *word_separator = nmxAudioText(locale, NMX_AUDIO_TEXT_NAME_WORD_SEPARATOR);
++    size_t used = 0;
++    int count = 0;
++    if (!out || capacity == 0)
++        return 0;
++    out[0] = '\0';
++    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
++        if (!parts[i] || !parts[i][0])
++            continue;
++        if (count && !nmxAudioAppend(out, capacity, &used, word_separator))
++            goto fail;
++        if (!nmxAudioAppend(out, capacity, &used, parts[i]))
++            goto fail;
++        ++count;
++    }
++    return count != 0;
++fail:
++    out[0] = '\0';
++    return 0;
++}
++
++static inline int nmxAudioFormatPCMName(NMXAudioLocaleCode locale,
++    const char *codec, const char *port, const char *color, const char *channels,
++    char *out, size_t capacity)
++{
++    const char *parts[3] = { port, color, channels };
++    size_t used = 0;
++    int count = 0;
++    int has_codec = codec && codec[0];
++    if (!out || capacity == 0)
++        return 0;
++    out[0] = '\0';
++    if (!has_codec && (!port || !port[0]) && (!color || !color[0]) &&
++        (!channels || !channels[0]))
++        return 0;
++    if (has_codec && !nmxAudioAppend(out, capacity, &used, codec))
++        goto fail;
++    if (has_codec && (port || color || channels) &&
++        !nmxAudioAppend(out, capacity, &used, nmxAudioText(locale, NMX_AUDIO_TEXT_NAME_OPEN)))
++        goto fail;
++    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); ++i) {
++        if (!parts[i] || !parts[i][0])
++            continue;
++        if (count && !nmxAudioAppend(out, capacity, &used,
++            nmxAudioText(locale, NMX_AUDIO_TEXT_NAME_SEPARATOR)))
++            goto fail;
++        if (!nmxAudioAppend(out, capacity, &used, parts[i]))
++            goto fail;
++        ++count;
++    }
++    if (has_codec && count &&
++        !nmxAudioAppend(out, capacity, &used, nmxAudioText(locale, NMX_AUDIO_TEXT_NAME_CLOSE)))
++        goto fail;
++    return count != 0 || has_codec;
++fail:
++    out[0] = '\0';
++    return 0;
 +}
 +
 +#endif
@@ -1151,10 +1792,10 @@ index 0000000000000000000000000000000000000000..00cd0440ee52236c362ddfe3da9e0d34
 +#endif
 diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h b/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5041d704bafdfa94faacea6ef0ad60da7f4c3a1f
+index 0000000000000000000000000000000000000000..c3ae59627ab7898d9a9028788e42d80c20a9370f
 --- /dev/null
 +++ b/realmac27/audio/NMXAudio/xnuinc/nmx_display_gain.h
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,122 @@
 +#ifndef NMX_DISPLAY_GAIN_H
 +#define NMX_DISPLAY_GAIN_H
 +
@@ -1166,7 +1807,6 @@ index 0000000000000000000000000000000000000000..5041d704bafdfa94faacea6ef0ad60da
 +// A value snapshot suitable for passing into the sample callback. Callers own
 +// synchronization when updating these controls on a live audio engine.
 +struct Levels {
-+    unsigned master = 100;
 +    unsigned left = 100;
 +    unsigned right = 100;
 +    bool muted = false;
@@ -1181,17 +1821,17 @@ index 0000000000000000000000000000000000000000..5041d704bafdfa94faacea6ef0ad60da
 +{
 +    if (level >= 100)
 +        return 1.0f; // Keep unity exact; do not run it through a curve.
-+    return static_cast<float>(level) / 100.0f;
++    // IOAudioFamily exposes the square of the normalized integer step as
++    // the HAL volume scalar. Use that same scalar for PCM amplitude.
++    const float step = static_cast<float>(level) / 100.0f;
++    return step * step;
 +}
 +
-+// Linear attenuation is deliberate here: this helper does not impose a dB
-+// curve. The master gain multiplies each independent channel gain.
 +inline ChannelGains precompute(const Levels &levels) noexcept
 +{
 +    if (levels.muted)
 +        return {0.0f, 0.0f};
-+    const float master = levelGain(levels.master);
-+    return {master * levelGain(levels.left), master * levelGain(levels.right)};
++    return {levelGain(levels.left), levelGain(levels.right)};
 +}
 +
 +inline float boundedGain(float gain) noexcept
@@ -1279,7 +1919,7 @@ index 0000000000000000000000000000000000000000..5041d704bafdfa94faacea6ef0ad60da
 +
 +#endif // NMX_DISPLAY_GAIN_H
 diff --git a/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h b/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
-index 1c87587f7a647f8fa2b52ae26924a382507748a2..1bf2ac3a64e6c80c31f70794ca2c0283fd0018e1 100644
+index 1c87587f7a647f8fa2b52ae26924a382507748a2..528e85124bd6992ac03a566eae880ae5290becf7 100644
 --- a/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
 +++ b/realmac27/audio/NMXAudio/xnuinc/nmx_pcm.h
 @@ -5,6 +5,7 @@
@@ -1290,7 +1930,7 @@ index 1c87587f7a647f8fa2b52ae26924a382507748a2..1bf2ac3a64e6c80c31f70794ca2c0283
  
  #ifdef __cplusplus
  extern "C" {
-@@ -16,6 +17,22 @@ struct pcm_channel;
+@@ -16,6 +17,78 @@ struct pcm_channel;
  #define NMX_DIR_PLAY 1
  #define NMX_DIR_REC  3
  
@@ -1300,20 +1940,76 @@ index 1c87587f7a647f8fa2b52ae26924a382507748a2..1bf2ac3a64e6c80c31f70794ca2c0283
 +    NMX_DISPLAY_CONNECTED
 +};
 +
++/* HDA pin metadata, copied from each enabled pin's default configuration.
++ * Role values intentionally match the HDA default-config device field. */
++#define NMX_AUDIO_MAX_PIN_METADATA 32
++#define NMX_AUDIO_CODEC_NAME_MAX 64
++#define NMX_AUDIO_CHANNEL_LAYOUT_MAX 24
++
 +enum {
-+    NMX_AUDIO_ROLE_UNKNOWN,
-+    NMX_AUDIO_ROLE_LINE_OUT,
-+    NMX_AUDIO_ROLE_SPEAKER,
-+    NMX_AUDIO_ROLE_HEADPHONES,
-+    NMX_AUDIO_ROLE_DIGITAL_OUT,
-+    NMX_AUDIO_ROLE_LINE_IN,
-+    NMX_AUDIO_ROLE_MICROPHONE
++    NMX_AUDIO_PIN_DIRECTION_UNKNOWN = 0,
++    NMX_AUDIO_PIN_DIRECTION_OUTPUT = 1,
++    NMX_AUDIO_PIN_DIRECTION_INPUT = 2
++};
++
++enum {
++    NMX_AUDIO_PIN_DEVICE_LINE_OUT = 0,
++    NMX_AUDIO_PIN_DEVICE_SPEAKER = 1,
++    NMX_AUDIO_PIN_DEVICE_HEADPHONES = 2,
++    NMX_AUDIO_PIN_DEVICE_CD = 3,
++    NMX_AUDIO_PIN_DEVICE_SPDIF_OUT = 4,
++    NMX_AUDIO_PIN_DEVICE_DIGITAL_OUT = 5,
++    NMX_AUDIO_PIN_DEVICE_MODEM_LINE = 6,
++    NMX_AUDIO_PIN_DEVICE_MODEM_HANDSET = 7,
++    NMX_AUDIO_PIN_DEVICE_LINE_IN = 8,
++    NMX_AUDIO_PIN_DEVICE_AUX = 9,
++    NMX_AUDIO_PIN_DEVICE_MICROPHONE = 10,
++    NMX_AUDIO_PIN_DEVICE_TELEPHONY = 11,
++    NMX_AUDIO_PIN_DEVICE_SPDIF_IN = 12,
++    NMX_AUDIO_PIN_DEVICE_DIGITAL_IN = 13,
++    NMX_AUDIO_PIN_DEVICE_OTHER = 15,
++    NMX_AUDIO_PIN_DEVICE_UNKNOWN = 0xff
++};
++
++enum {
++    NMX_AUDIO_SIGNAL_UNKNOWN = 0,
++    NMX_AUDIO_SIGNAL_ANALOG = 1,
++    NMX_AUDIO_SIGNAL_DIGITAL = 2,
++    NMX_AUDIO_SIGNAL_HDMI = 3,
++    NMX_AUDIO_SIGNAL_DISPLAYPORT = 4,
++    NMX_AUDIO_SIGNAL_HDMI_DP = 5
++};
++
++struct nmx_audio_pin_metadata {
++    uint8_t node_id;
++    uint8_t direction;
++    uint8_t role;
++    uint8_t location;
++    uint8_t color;
++    uint8_t connector;
++    uint8_t connectivity;
++    uint8_t digital;
++    uint8_t association;
++    uint8_t sequence;
++};
++
++struct nmx_pcm_label_metadata {
++    char codec_name[NMX_AUDIO_CODEC_NAME_MAX];
++    char channel_layout[NMX_AUDIO_CHANNEL_LAYOUT_MAX];
++    uint8_t pin_count;
++    struct nmx_audio_pin_metadata pins[NMX_AUDIO_MAX_PIN_METADATA];
++    uint8_t direction;
++    uint8_t role;
++    uint8_t location;
++    uint8_t color;
++    uint8_t color_is_common;
++    uint8_t signal;
 +};
 +
  /* one play or record channel of a PCM device */
  int nmx_chan_dir(struct pcm_channel *c);
  /* formats the codec accepts (FreeBSD AFMT_* | channel count), 0-terminated; and its rate range */
-@@ -29,11 +46,14 @@ int nmx_chan_start(struct pcm_channel *c);
+@@ -29,11 +102,15 @@ int nmx_chan_start(struct pcm_channel *c);
  int nmx_chan_stop(struct pcm_channel *c);
  uint32_t nmx_chan_getptr(struct pcm_channel *c);	/* byte offset in the ring the hardware has reached */
  void nmx_chan_set_engine(struct pcm_channel *c, void *engine);
@@ -1324,11 +2020,12 @@ index 1c87587f7a647f8fa2b52ae26924a382507748a2..1bf2ac3a64e6c80c31f70794ca2c0283
  struct pcm_channel *nmx_pcm_chan(struct snddev_info *sc, int i);
  const char *nmx_pcm_name(struct snddev_info *sc);	/* "Realtek ALC897 (Analog)" etc. */
 +int nmx_pcm_display_endpoint(struct snddev_info *sc, struct nmx_display_endpoint *endpoint);
-+int nmx_pcm_label_role(struct snddev_info *sc, int direction);
++int nmx_pcm_get_label_metadata(struct snddev_info *sc, int direction,
++    struct nmx_pcm_label_metadata *metadata);
  /* where the PCM device sits, stable across boots: the controller's PCI address, then the device's position under its
   * codec. Unit numbers are not stable (two controllers attach in parallel), and names repeat (four identical HDMI pins) */
  void nmx_pcm_location(struct snddev_info *sc, char *buf, size_t len);
-@@ -42,7 +62,7 @@ int nmx_pcm_mixer_set(struct snddev_info *sc, unsigned dev, unsigned left, unsig
+@@ -42,7 +119,7 @@ int nmx_pcm_mixer_set(struct snddev_info *sc, unsigned dev, unsigned left, unsig
  
  /* the engine side (nmx_audio_engine.cpp) */
  void nmx_audio_publish(struct snddev_info *sc);		/* pcm_register: make the IOAudioDevice */
