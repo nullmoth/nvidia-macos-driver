@@ -647,6 +647,7 @@ class NVRMNVDAFramebuffer : public IOFramebuffer {
     SInt32 fCurHotX = 0, fCurHotY = 0, fCurTurnedHotX = 0, fCurTurnedHotY = 0;
     UInt32 fTransform = 0;
     volatile UInt32 fServerFresh = 0;
+    bool fConsHomed = false;     // the kernel text console draws on this framebuffer's scanout (verbose start only)
     IOReturn newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler) override;
     void publishStartupTiming();
     void publishRotatedSizes(bool force = true);
@@ -1740,6 +1741,26 @@ bool NVRMNVDAFramebuffer::kapiInit()
         if (take) take->release(); if (done) done->release();
     }
     if (!painted) for (NvU64 i = 0; i < fSize / 4; i++) px[i] = 0x00000000;
+    // A verbose start keeps its text. The console was switched off above so nothing drew into memory while the
+    // scanout was allocated, and on success nothing switched it back on: the text stopped at the last frame the
+    // firmware's surface showed (the platform's base is often stale by then, because PCI setup moves this card's
+    // windows after the firmware drew). A Mac's own graphics driver hands the console to its framebuffer, so text runs
+    // until WindowServer takes the screen; this does the same with the boot head's scanout: the console's new home is
+    // this surface's physical address (low bit set: a physical base, as IOPCIConfigurator passes it), then it is
+    // switched on again. newUserClient switches it off when WindowServer connects.
+    if (consoleSilenced && fPhys && fPitch && fW && fH && (NvU64)fPitch * fH <= fSize && getPlatform()) {
+        char vb[4] = { 0 };
+        if (PE_parse_boot_argn("-v", vb, sizeof vb)) {
+            PE_Video nv; nvu_zero(&nv, sizeof nv);
+            nv.v_baseAddr = (unsigned long)(fPhys | 1);
+            nv.v_rowBytes = fPitch; nv.v_width = fW; nv.v_height = fH; nv.v_depth = 32;
+            getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
+            getPlatform()->setConsoleInfo(0, kPEEnableScreen);
+            fConsHomed = true;
+            FBLOG("kernel console moved to the boot head's scanout (pitch %u, %ux%u) and switched on (verbose start)",
+                  fPitch, fW, fH);
+        }
+    }
     return true;
 }
 
@@ -5152,7 +5173,15 @@ bool NVRMNVDAFramebuffer::flipToMemory(struct NvKmsKapiMemory *mem, unsigned w, 
 IOReturn NVRMNVDAFramebuffer::newUserClient(task_t owningTask, void *securityID, UInt32 type, IOUserClient **handler)
 {
     const IOReturn rc = super::newUserClient(owningTask, securityID, type, handler);
-    if (rc == kIOReturnSuccess && type == kIOFBServerConnectType) fServerFresh = 1;
+    if (rc == kIOReturnSuccess && type == kIOFBServerConnectType) {
+        fServerFresh = 1;
+        // WindowServer owns the screen from here; the text console must not draw over its frames
+        if (fConsHomed && getPlatform()) {
+            getPlatform()->setConsoleInfo(0, kPEDisableScreen);
+            fConsHomed = false;
+            FBLOG("kernel console switched off: WindowServer connected");
+        }
+    }
     return rc;
 }
 
