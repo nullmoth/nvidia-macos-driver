@@ -1668,8 +1668,23 @@ bool NVRM::placeLargeBar1()
         char vb[8] = { 0 };
         const bool verbose = PE_parse_boot_argn("-v", vb, sizeof vb);
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
-            getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-            LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
+            // The firmware's screen is the same VRAM it was: the head still scans it out, and only the window the CPU
+            // reaches it through moved. So the console follows the window to the same offset and stays on, and a verbose
+            // start keeps showing its text instead of freezing until the framebuffer takes over. It is silenced only
+            // when that offset does not fit in the new window (it then would draw where nothing decodes, about half a
+            // second per line).
+            const UInt64 off = con - fwBar1;
+            const UInt64 need = (UInt64)pv.v_rowBytes * (UInt64)pv.v_height;
+            if (need && off + need <= bar1Size) {
+                PE_Video nv = pv;
+                nv.v_baseAddr = (unsigned long)((bar1Base + off) | 1);     // a physical base, as IOPCIConfigurator passes it
+                getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
+                getPlatform()->setConsoleInfo(0, kPEEnableScreen);
+                LOG("bar1: verbose console moved with BAR1: 0x%llx -> 0x%llx (+%llu B), on", con, bar1Base + off, need);
+            } else {
+                getPlatform()->setConsoleInfo(0, kPEDisableScreen);
+                LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
+            }
         }
     }
     return true;
