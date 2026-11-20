@@ -1667,6 +1667,15 @@ bool NVRM::placeLargeBar1()
         const UInt64 con = (getPlatform() && getPlatform()->getConsoleInfo(&pv) == kIOReturnSuccess) ? ((UInt64)pv.v_baseAddr & ~3ull) : 0;
         char vb[8] = { 0 };
         const bool verbose = PE_parse_boot_argn("-v", vb, sizeof vb);
+        {
+            // The decision and its inputs, readable with ioreg after the start: the kernel log of this stage is often
+            // gone by the time anyone looks, and the screen alone cannot say which input failed.
+            char why[192];
+            snprintf(why, sizeof why, "con 0x%llx fw 0x%llx/%llu MB new 0x%llx/%llu MB verbose %d lost %d",
+                     con, fwBar1, fwBar1Size >> 20, bar1Base, bar1Size >> 20, (int)verbose,
+                     (int)nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose));
+            fPCI->setProperty("nvrm-console-move", why);
+        }
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
             // The firmware's screen is the same VRAM it was: the head still scans it out, and only the window the CPU
             // reaches it through moved. So the console follows the window to the same offset and stays on, and a verbose
@@ -1681,6 +1690,7 @@ bool NVRM::placeLargeBar1()
                 getPlatform()->setConsoleInfo(&nv, kPEBaseAddressChange);
                 getPlatform()->setConsoleInfo(0, kPEEnableScreen);
                 LOG("bar1: verbose console moved with BAR1: 0x%llx -> 0x%llx (+%llu B), on", con, bar1Base + off, need);
+                fPCI->setProperty("nvrm-console-moved-to", bar1Base + off, 64);
             } else {
                 getPlatform()->setConsoleInfo(0, kPEDisableScreen);
                 LOG("bar1: verbose console at 0x%llx is no longer decoded after the move - silenced until the framebuffer takes over", con);
