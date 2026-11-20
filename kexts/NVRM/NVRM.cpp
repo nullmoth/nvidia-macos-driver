@@ -646,7 +646,29 @@ static struct {
     bool rmDone, rmUp, started, stopped, full;
     UInt64 deadline;
     UInt32 pushes, rows;
+    // Read back with ioreg ("nvrm-console-copier"): on macOS 27 this stage's kernel log never reaches the unified log.
+    IOService *pub;
+    UInt32 phPushes[3], phRows[3], pausedTicks;        // per RM BAR1 state: 0 firmware window, 1 paused, 2 static
+    UInt64 msStart, msFirstPause, msResume, msLastPush, msStop;
+    UInt64 staticOff;
+    char stopWhy[24];
 } gCons;
+
+static UInt64 nvrmConsMs(void)
+{
+    UInt64 ns; absolutetime_to_nanoseconds(mach_absolute_time(), &ns); return ns / 1000000ull;
+}
+
+static void nvrmConsPublish(void)
+{
+    if (!gCons.pub) return;
+    char b[320];
+    snprintf(b, sizeof b, "fw %u/%u paused %u static %u/%u off 0x%llx | ms start %llu pause %llu resume %llu last %llu stop %llu (%s)",
+             gCons.phPushes[0], gCons.phRows[0], gCons.pausedTicks, gCons.phPushes[2], gCons.phRows[2], gCons.staticOff,
+             gCons.msStart, gCons.msFirstPause, gCons.msResume, gCons.msLastPush, gCons.msStop,
+             gCons.stopWhy[0] ? gCons.stopWhy : "running");
+    gCons.pub->setProperty("nvrm-console-copier", b);
+}
 
 static void nvrmConsUnmap(void)
 {
@@ -672,6 +694,9 @@ static void nvrmConsStop(const char *why)
 {
     gCons.stopped = true;
     nvrmConsUnmap();
+    gCons.msStop = nvrmConsMs();
+    strlcpy(gCons.stopWhy, why, sizeof gCons.stopWhy);
+    nvrmConsPublish();
     IOLog("NVRM: verbose console copier stopped (%s) after %u pushes, %u rows\n", why, gCons.pushes, gCons.rows);
 }
 
@@ -693,6 +718,7 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
         pe->setConsoleInfo(&pv, kPEBaseAddressChange);
         pe->setConsoleInfo(0, kPEEnableScreen);
         gCons.started = true;
+        gCons.msStart = nvrmConsMs();
         IOLog("NVRM: verbose console drawing into RAM, pushed to VRAM through BAR1 0x%llx\n", gCons.bar1Base);
     } else {
         PE_Video pv; bzero(&pv, sizeof pv);
@@ -709,7 +735,12 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
     if (st == 0 && !gCons.rmDone) want = gCons.bar1Base;
     else if (st == 2 && gCons.rmUp) want = gCons.bar1Base + off;
     if (gCons.rmDone && !gCons.rmUp) { nvrmConsStop("RM did not start"); IOLockUnlock(gCons.lock); return; }
+    if (!want) {
+        gCons.pausedTicks++;
+        if (!gCons.msFirstPause) gCons.msFirstPause = nvrmConsMs();
+    }
     if (want != gCons.targetPhys) {
+        if (want && st == 2) { gCons.msResume = nvrmConsMs(); gCons.staticOff = off; }
         if (!want) nvrmConsUnmap();
         else if (!nvrmConsMap(want)) { nvrmConsStop("remap"); IOLockUnlock(gCons.lock); return; }
         else {
@@ -727,16 +758,23 @@ static void nvrmConsTick(thread_call_param_t, thread_call_param_t)
             n++;
         }
         gCons.full = false;
-        if (n) { gCons.pushes++; gCons.rows += n; }
+        if (n) {
+            gCons.pushes++; gCons.rows += n; gCons.msLastPush = nvrmConsMs();
+            const int ph = (st == 2) ? 2 : 0;
+            gCons.phPushes[ph]++; gCons.phRows[ph] += n;
+        }
     }
+    static UInt32 tick;
+    if ((++tick % 30) == 0) nvrmConsPublish();          // about once a second
     IOLockUnlock(gCons.lock);
     uint64_t d; clock_interval_to_deadline(33, kMillisecondScale, &d);
     thread_call_enter_delayed(gCons.call, d);
 }
 
 // Called at the BAR1 move on a verbose start whose console the move took away. False = the console stays off.
-static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base)
+static bool nvrmConsStart(const PE_Video &pv, UInt64 bar1Base, IOService *pub)
 {
+    gCons.pub = pub;
     if (pv.v_depth != 32 || !pv.v_rowBytes || !pv.v_height || !pv.v_width) return false;
     const size_t len = (size_t)pv.v_rowBytes * pv.v_height;
     gCons.lock = IOLockAlloc();
@@ -1828,7 +1866,7 @@ bool NVRM::placeLargeBar1()
         if (nvrmConsoleLostByMove(con, fwBar1, fwBar1Size, bar1Base, bar1Size, verbose)) {
             // The console is off until the copier's first tick hands it a RAM copy of the screen (see gCons above).
             getPlatform()->setConsoleInfo(0, kPEDisableScreen);
-            gNvrmConsoleAwaitsRm = nvrmConsStart(pv, bar1Base);
+            gNvrmConsoleAwaitsRm = nvrmConsStart(pv, bar1Base, fPCI);
             LOG("bar1: verbose console 0x%llx -> RAM copy pushed through the new BAR1 0x%llx: %s", con, bar1Base,
                 gNvrmConsoleAwaitsRm ? "on" : "could not start, console stays off");
             fPCI->setProperty("nvrm-console-moved-to", bar1Base, 64);
