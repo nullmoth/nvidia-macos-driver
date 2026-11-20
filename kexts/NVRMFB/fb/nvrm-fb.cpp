@@ -3166,9 +3166,14 @@ IOReturn NVRMNVDAFramebuffer::enableController()
     FBLOG("enableController");
     if (fDdcBrightness && !fDdcBrightnessGate) {
         if (IOWorkLoop *loop = getWorkLoop()) {
-            fDdcBrightnessGate = IOCommandGate::commandGate(this);
-            if (fDdcBrightnessGate && loop->addEventSource(fDdcBrightnessGate) != kIOReturnSuccess)
-                OSSafeReleaseNULL(fDdcBrightnessGate);
+            IOCommandGate *gate = IOCommandGate::commandGate(this);
+            if (gate && loop->addEventSource(gate) == kIOReturnSuccess) {
+                fDdcBrightnessGate = gate;
+                // An early display match may have queued a probe before this gate was ready.
+                scheduleDdcProbe(kNVRMDdcProbeFirstDelayMs);
+            } else {
+                OSSafeReleaseNULL(gate);
+            }
         }
     }
     fEnableAbs = mach_absolute_time();

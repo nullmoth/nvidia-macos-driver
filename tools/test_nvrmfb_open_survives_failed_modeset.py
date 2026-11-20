@@ -34,6 +34,7 @@ HARNESS = r'''
 #include <cstdio>
 typedef int IOReturn;
 static const IOReturn kIOReturnSuccess = 0, kIOReturnError = (IOReturn)0xe00002bc;
+static constexpr unsigned kNVRMDdcProbeFirstDelayMs = 350;
 #define OSSafeReleaseNULL(p) do { delete p; p = nullptr; } while (0)
 struct IOWorkLoop { int addEventSource(void *) { return 0; } };
 struct IOCommandGate { static IOCommandGate *commandGate(void *) { return new IOCommandGate; } };
@@ -43,6 +44,7 @@ static unsigned long long mach_absolute_time() { return 1; }
 struct NVRMNVDAFramebuffer {
     void *fDdcBrightness = nullptr; IOCommandGate *fDdcBrightnessGate = nullptr;
     IOWorkLoop *getWorkLoop() { return nullptr; }
+    void scheduleDdcProbe(unsigned) {}
     bool modeOk; unsigned long long fEnableAbs = 0; bool fHotplugBorn = true, fConnectFired = false; unsigned fIndex = 0;
     bool fProxy = false;   // an NVIDIA head, not the proxy for another GPU's panel (which returns before the mode set)
     int notified = 0, audio = 0;
