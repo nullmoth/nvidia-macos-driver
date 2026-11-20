@@ -90,7 +90,8 @@ nf=$(grep -c FAIL "$B/fails.txt"); echo "failed: $nf of $n"
 rm -f "$O/libnvkernel.a"
 ls "$O"/*.o > "$B/objs.txt"; xcrun libtool -static -o "$O/libnvkernel.a" -filelist "$B/objs.txt" 2>"$B/libtool.err" || { tail -5 "$B/libtool.err"; exit 4; }
 echo "libnvkernel.a $(stat -f%z "$O/libnvkernel.a") B from $(wc -l < "$B/objs.txt") objects"
-left=$(strings -a "$O/libnvkernel.a" | grep -ciE "$(id -un)|$(hostname -s)" || true)   # the building account or host
-[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkernel.a"; strings -a "$O/libnvkernel.a" | grep -iE "$(id -un)|$(hostname -s)" | head -3; exit 6; }
+local_names=(-iFw -e "$(id -un)" -e "$(hostname -s)")
+left=$(strings -a "$O/libnvkernel.a" | grep -c "${local_names[@]}" || true)   # the building account or host
+[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkernel.a"; strings -a "$O/libnvkernel.a" | grep "${local_names[@]}" | head -3; exit 6; }
 echo "personal strings in libnvkernel.a: 0"
 shasum -a 256 "$O/libnvkernel.a" > "$T/.nm-rm-archive.sha256"

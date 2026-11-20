@@ -39,7 +39,8 @@ xcrun libtool -static -o "$O/libnvkms.a" -filelist "$B/kobjs.txt" 2>"$B/klibtool
 echo "libnvkms.a $(stat -f%z "$O/libnvkms.a") B from $(wc -l < "$B/kobjs.txt" | tr -d " ") objects"
 undefined=$(xcrun nm -u "$O/libnvkms.a" 2> "$B/kms-imports.err") || exit 5
 case "$undefined" in *___x86_return_thunk*) echo "STOP: KMS still imports a Linux return thunk"; exit 5;; esac
-left=$(strings -a "$O/libnvkms.a" | grep -ciE "$(id -un)|$(hostname -s)" || true)   # the building account or host
-[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkms.a"; strings -a "$O/libnvkms.a" | grep -iE "$(id -un)|$(hostname -s)" | head -3; exit 6; }
+local_names=(-iFw -e "$(id -un)" -e "$(hostname -s)")
+left=$(strings -a "$O/libnvkms.a" | grep -c "${local_names[@]}" || true)   # the building account or host
+[ "$left" = 0 ] || { echo "STOP: $left personal string(s) in libnvkms.a"; strings -a "$O/libnvkms.a" | grep "${local_names[@]}" | head -3; exit 6; }
 echo "personal strings in libnvkms.a: 0"
 shasum -a 256 "$O/libnvkms.a" > "$B/ogkm-$V/.nm-kms-archive.sha256"

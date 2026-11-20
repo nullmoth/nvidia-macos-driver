@@ -25,3 +25,9 @@ static inline unsigned long long nvrmApertureBytes(unsigned pitch, unsigned heig
     const unsigned long long spare = owned - need;
     return need + (spare < 128 ? spare : 128);
 }
+// The T2751U accepts a native brightness update after the DDC/CI reply's minimum settle time.
+static inline bool nvrmDdcFastBrightnessRead(const unsigned char *edid, unsigned size, unsigned connectorType)
+{
+    return connectorType == 0x400 && size >= 128 &&
+           edid[8] == 0x21 && edid[9] == 0x63 && edid[10] == 0x51 && edid[11] == 0x27;
+}
