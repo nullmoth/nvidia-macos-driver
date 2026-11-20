@@ -12,7 +12,7 @@ EFI_TARGET=""
 while [ "$#" != 0 ]; do
   case "$1" in
     --payload)
-      [ "$#" -ge 2 ] && [ -d "$2" ] || { echo "STOP: --payload requires an existing package directory" >&2; exit 2; }
+      [ "$#" -ge 2 ] && [ -d "$2" ] || { echo "STOP: --payload 后必须是已存在的软件包目录" >&2; exit 2; }
       HERE=$(cd "$2" && pwd) || exit 2; shift 2;;
     --dlss=yes) DLSS_CHOICE=yes; shift;;
     --dlss=no) DLSS_CHOICE=no; shift;;
@@ -22,9 +22,9 @@ while [ "$#" != 0 ]; do
     --intel-panel=no) INTEL_PANEL_CHOICE=no; shift;;
     --webkit-fixup=manual|--webkit-fixup=auto|--webkit-fixup=skip) WEBKIT_CHOICE=${1#*=}; shift;;
     --efi-target)
-      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "STOP: --efi-target requires diskXsY or a mounted EFI/OC path" >&2; exit 2; }
+      [ "$#" -ge 2 ] && [ -n "$2" ] || { echo "STOP: --efi-target 后必须是 diskXsY 或已挂载的 EFI/OC 路径" >&2; exit 2; }
       EFI_TARGET=$2; shift 2;;
-    *) echo "STOP: expected --payload directory, --intel-panel=yes|no, --audio=yes|no, --dlss=yes|no, --webkit-fixup=manual|auto|skip or --efi-target target" >&2; exit 2;;
+    *) echo "STOP: 参数无效。可用参数：--payload 目录、--intel-panel=yes|no、--audio=yes|no、--dlss=yes|no、--webkit-fixup=manual|auto|skip 或 --efi-target 目标" >&2; exit 2;;
   esac
 done
 KEXTS="NVRM NVAccel NVRMFB NVRMAGDC"
@@ -66,14 +66,14 @@ release_install_lock() {
   if [ "$LOCK_HELD" = 1 ] && [ "$LOCK_RELEASE_OK" = 1 ]; then
     if [ -z "$LOCK_ID" ] || [ -L "$LOCKDIR" ] || [ ! -d "$LOCKDIR" ] ||
        [ "$(stat -f '%d:%i' "$LOCKDIR" 2>/dev/null)" != "$LOCK_ID" ]; then
-      echo "   NOTE: installer guard identity changed; its current path is retained for review." >&2
+      echo "   NOTE: 安装保护标记的身份已变化，保留当前路径供检查。" >&2
       return
     fi
     rm -f "$LOCKDIR/owner" "$LOCKDIR/installing"
-    rmdir "$LOCKDIR" || echo "   NOTE: installer lock could not be released; review it before another install." >&2
+    rmdir "$LOCKDIR" || echo "   NOTE: 无法释放安装锁；再次安装前请检查。" >&2
     LOCK_HELD=0
   elif [ "$LOCK_HELD" = 1 ]; then
-    echo "   NOTE: installer guard retained because restoration was incomplete; recovery review is required." >&2
+    echo "   NOTE: 由于恢复未完成，保留了安装保护标记；需要检查恢复状态。" >&2
   fi
 }
 
@@ -134,7 +134,7 @@ is_installer_pid() { ps -o command= -p "$1" 2>/dev/null | grep -Eq '(nullmoth-in
 recover_stale_guard() {
   local g=$LOCKDIR o=$LOCKDIR/owner pid="" boot="" bk=""
   [ -d "$g" ] && [ ! -L "$g" ] && [ "$(stat -f '%u' "$g" 2>/dev/null)" = 0 ] || return 0
-  [ ! -e "$g/restore-incomplete" ] || die "the last install could not restore the previous driver (its backup is kept in /Library/NullMoth); use Remove NVIDIA driver, then install again, or send logs (no driver changes made)"
+  [ ! -e "$g/restore-incomplete" ] || die "上次安装未能恢复旧驱动（备份保存在 /Library/NullMoth）；请先运行 Remove NVIDIA driver，再重新安装，或发送日志（未更改驱动）"
   if [ -f "$o" ] && [ ! -L "$o" ]; then
     pid=$(sed -n 's/^pid=\([0-9][0-9]*\)$/\1/p' "$o" | head -1); boot=$(sed -n 's/^boot=\([0-9][0-9]*\)$/\1/p' "$o" | head -1)
     bk=$(sed -n 's/^bk=\(.*\)$/\1/p' "$o" | head -1)
@@ -143,21 +143,21 @@ recover_stale_guard() {
     # a guard from 1.14.7 or earlier has no owner record: an install cannot outlive a restart, so one older than this boot is stale
     [ "$(stat -f '%m' "$g" 2>/dev/null || echo 0)" -lt $(( $(boot_sec) - 60 )) ] || return 0
   fi
-  echo "   NOTE: an earlier install was interrupted and left its guard behind; recovering it"
+  echo "   NOTE: 检测到先前安装中断后遗留的保护标记，正在恢复。"
   if [ -e "$g/installing" ]; then
-    case "$bk" in /Library/NullMoth/backup-*) ;; *) die "an interrupted install had changed driver files and its backup is not recorded; use Remove NVIDIA driver, then install again (no driver changes made)";; esac
-    [ -d "$bk" ] && [ ! -L "$bk" ] || die "the interrupted install's backup $bk is missing; use Remove NVIDIA driver, then install again (no driver changes made)"
+    case "$bk" in /Library/NullMoth/backup-*) ;; *) die "中断的安装已更改驱动文件，但未记录备份位置；请先运行 Remove NVIDIA driver，再重新安装（未更改驱动）";; esac
+    [ -d "$bk" ] && [ ! -L "$bk" ] || die "中断安装的备份 $bk 不存在；请先运行 Remove NVIDIA driver，再重新安装（未更改驱动）"
     BK=$bk
-    if ! rollback_install; then : > "$g/restore-incomplete"; die "restoring the interrupted install failed; its backup is kept at $bk"; fi
-    echo "   ok  the interrupted install was rolled back from $bk"; BK=""
+    if ! rollback_install; then : > "$g/restore-incomplete"; die "恢复中断的安装失败；备份保留在 $bk"; fi
+    echo "   ok  已使用 $bk 回滚中断的安装"; BK=""
   fi
-  rm -f "$o" "$g/installing"; rmdir "$g" 2>/dev/null || die "could not clear the interrupted install's guard"
+  rm -f "$o" "$g/installing"; rmdir "$g" 2>/dev/null || die "无法清除中断安装遗留的保护标记"
 }
 die() {
   echo "   STOP: $*" >&2
   if [ "$INSTALLING" = 1 ]; then
-    if rollback_install; then echo "   Previous installation restored; backup retained at $BK." >&2
-    else LOCK_RELEASE_OK=0; : > "$LOCKDIR/restore-incomplete" 2>/dev/null; echo "   Restore incomplete; recovery files remain at $BK." >&2; fi
+    if rollback_install; then echo "   已恢复先前安装；备份保留在 ${BK}。" >&2
+    else LOCK_RELEASE_OK=0; : > "$LOCKDIR/restore-incomplete" 2>/dev/null; echo "   恢复未完成；恢复文件保留在 ${BK}。" >&2; fi
   fi
   exit 1
 }
@@ -171,25 +171,25 @@ backup_copy() {
     printf '   BACKUP-DIAGNOSTIC component=%s command-status=%s capture-status=%s stderr-tail-limit=4096\n' "$component" "${status[0]}" "${status[1]}" >&2
     [ ! -f "$T/backup-error.log" ] || cat "$T/backup-error.log" >&2
     echo >&2
-    die "back up $component"
+    die "备份 $component"
   fi
 }
 finish_install() { [ -z "$STAGE" ] || rm -rf "$STAGE"; release_install_lock; }
 trap finish_install EXIT
-trap 'die "installer interrupted (signal HUP)"' HUP
-trap 'die "installer interrupted (signal INT)"' INT
-trap 'die "installer interrupted (signal TERM)"' TERM
+trap 'die "安装器被中断（收到 HUP 信号）"' HUP
+trap 'die "安装器被中断（收到 INT 信号）"' INT
+trap 'die "安装器被中断（收到 TERM 信号）"' TERM
 
-[ "$(id -u)" -eq 0 ] || die "run with sudo"
-step "1. this Mac"
-[ "$(uname -m)" = x86_64 ] || die "Intel/x86_64 only"
+[ "$(id -u)" -eq 0 ] || die "请使用 sudo 运行"
+step "1. 本机检查"
+[ "$(uname -m)" = x86_64 ] || die "仅支持 Intel/x86_64"
 v=$(sw_vers -productVersion); MAJ=${v%%.*}
 BUILD=$(sw_vers -buildVersion)
-printf '%s\n' "$BUILD" | grep -Eq '^[0-9]+[A-Za-z][A-Za-z0-9]+$' || die "cannot identify the current macOS build"
-case $MAJ in 15|26) ;; *) die "This driver is built for macOS 15 and 26 (this is $v); no changes made";; esac
+printf '%s\n' "$BUILD" | grep -Eq '^[0-9]+[A-Za-z][A-Za-z0-9]+$' || die "无法识别当前 macOS 构建版本"
+case $MAJ in 15|26) ;; *) die "此驱动适用于 macOS 15 和 26（当前为 ${v}）；未作任何更改";; esac
 # NVAccel is the one kext built per macOS: Tahoe made the IOAcceleratorFamily2 methods it inherits private (see
 # kexts/NVRM/accel/gen_tahoe_fwd.py). The other three kexts are the same binaries on 15 and 26.
-VAR="$HERE/Library/NullMoth/kexts/$MAJ"; [ -d "$VAR/NVAccel.kext" ] || die "this package has no NVAccel for macOS $MAJ"
+VAR="$HERE/Library/NullMoth/kexts/$MAJ"; [ -d "$VAR/NVAccel.kext" ] || die "此软件包不包含 macOS $MAJ 所需的 NVAccel"
 kpath() {
   case "$1" in
     NVAccel) echo "$VAR/NVAccel.kext";;
@@ -199,7 +199,7 @@ kpath() {
     *) echo "$HERE/Library/Extensions/$1.kext";;
   esac
 }
-ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "no NVIDIA GPU found on PCI"
+ioreg -r -c IOPCIDevice -d 1 | grep -q '"vendor-id" = <de100000>' || die "未在 PCI 上检测到 NVIDIA GPU"
 # The driver runs the cards NVIDIA's GSP firmware supports (Turing and later). The same list the Windows builder uses
 # (open-gpu-kernel-modules 620.70.06: 615's list + 2BBD RTX PRO 5500 Blackwell, 2E13 RTX Spark N1X; the datacenter
 # VR NVL72 3041 left out like the other datacenter parts). Installing it for an older card (GTX 10 and before)
@@ -223,18 +223,18 @@ CARD=""; for i in $NV_IDS; do case " $(echo $SUPPORTED_IDS) " in *" $i "*) CARD=
 # Every device id from 1E00 up is Turing or newer (TU102 is 1E02; Volta and older sit below it), which RM drives through GSP.
 # The list above names the GeForce/RTX ids measured so far; a Quadro T1200 laptop (1FBC) was refused as "older".
 [ -n "$CARD" ] || for i in $NV_IDS; do case $i in *[!0-9A-F]*|"") ;; *) [ $((16#$i)) -ge $((16#1E00)) ] && CARD=$i;; esac; done
-[ -n "$CARD" ] || die "this NVIDIA card (device $(echo $NV_IDS)) is older than the driver supports (RTX 20 / Turing and newer); macOS keeps running on it in basic display, with no changes made"
-ok "macOS $v, x86_64, NVIDIA GPU present"
+[ -n "$CARD" ] || die "这张 NVIDIA 显卡（设备 $(echo $NV_IDS)）早于本驱动支持的型号（RTX 20 / Turing 及更新型号）；macOS 会继续使用基本显示模式，未作任何更改"
+ok "macOS ${v}，x86_64，已检测到 NVIDIA GPU"
 
-step "2. package integrity"
+step "2. 软件包完整性检查"
 # The extracted package is usually writable by the logged-in user, so a process running as that user could swap a kext
 # between this check and the copy into /Library/Extensions. Check and install a root-owned private copy instead.
 SELF=$(cd "$(dirname "$0")" && pwd)
-STAGE=$(mktemp -d /var/tmp/nullmoth-package.XXXXXX) && [ -n "$STAGE" ] && [ -d "$STAGE" ] || die "create private package copy"
-cp -cR "$HERE" "$STAGE/pkgroot" 2>/dev/null || { rm -rf "$STAGE/pkgroot"; ditto "$HERE" "$STAGE/pkgroot"; } && chown -R root:wheel "$STAGE" && chmod -R go-w "$STAGE" || die "copy package to $STAGE"
+STAGE=$(mktemp -d /var/tmp/nullmoth-package.XXXXXX) && [ -n "$STAGE" ] && [ -d "$STAGE" ] || die "无法创建软件包临时副本"
+cp -cR "$HERE" "$STAGE/pkgroot" 2>/dev/null || { rm -rf "$STAGE/pkgroot"; ditto "$HERE" "$STAGE/pkgroot"; } && chown -R root:wheel "$STAGE" && chmod -R go-w "$STAGE" || die "无法将软件包复制到 $STAGE"
 # shasum follows links: a link to an identical file outside the copy passes the check and can still change later.
 while IFS= read -r -d '' link; do
-  case "$(readlink "$link")" in /*|..|../*|*/..|*/../*) die "package holds a link that leaves the package: ${link#"$STAGE/pkgroot/"}";; esac
+  case "$(readlink "$link")" in /*|..|../*|*/..|*/../*) die "软件包中存在指向软件包目录之外的链接：${link#"$STAGE/pkgroot/"}";; esac
 done < <(find "$STAGE/pkgroot" -type l -print0)
 [ "$SELF" = "$HERE" ] && SELF="$STAGE/pkgroot"
 HERE="$STAGE/pkgroot"
@@ -242,53 +242,53 @@ HERE="$STAGE/pkgroot"
 # at the private copy too, or that one kernel extension is still taken from the folder the check no longer covers.
 VAR="$HERE/Library/NullMoth/kexts/$MAJ"
 # --strict: without it shasum skips a malformed line and still reports success
-(cd "$HERE" && shasum -a 256 --strict -c SHA256SUMS --quiet) || die "SHA256SUMS mismatch: re-download the package"
+(cd "$HERE" && shasum -a 256 --strict -c SHA256SUMS --quiet) || die "SHA256SUMS 校验不匹配：请重新下载软件包"
 # Hash verification alone ignores files absent from the manifest. Check the
 # complete private payload, using a checker whose own bytes were just verified.
 [ -f "$HERE/sums_complete.sh" ] && [ ! -L "$HERE/sums_complete.sh" ] && \
   grep -qE '^[0-9a-fA-F]{64} [ *](\./)?sums_complete\.sh$' "$HERE/SHA256SUMS" \
-  || die "this package does not carry a verified sums_complete.sh: re-download the package"
-bash "$HERE/sums_complete.sh" "$HERE" || die "the package holds files SHA256SUMS does not list: re-download the package"
+  || die "此软件包未包含经过校验的 sums_complete.sh：请重新下载软件包"
+bash "$HERE/sums_complete.sh" "$HERE" || die "软件包中存在未列入 SHA256SUMS 的文件：请重新下载软件包"
 for target in 15 26; do
   [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/MacOS/NVAccel" ] && \
-    [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "this package lacks the complete macOS $target accelerator"
+    [ -f "$HERE/Library/NullMoth/kexts/$target/NVAccel.kext/Contents/Info.plist" ] || die "此软件包缺少完整的 macOS $target 图形加速组件"
 done
-ok "every file matches SHA256SUMS and both OS accelerators are present"
+ok "所有文件均与 SHA256SUMS 匹配，且两个 macOS 版本的图形加速组件均已包含"
 # The portable model name can be spoofed on a Hackintosh, and it does not tell
 # us which GPU owns the panel. Ask instead of enabling this framebuffer from it.
 INTEL_PANEL=0; INTEL_PANEL_TOUCHED=0
 if [ -e "$EXT/NMIntelFB.kext" ] || [ -L "$EXT/NMIntelFB.kext" ]; then
   [ ! -L "$EXT/NMIntelFB.kext" ] && [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXT/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
-    || die "cannot identify the existing NMIntelFB.kext; no driver changes made"
+    || die "无法识别现有的 NMIntelFB.kext；未更改驱动"
   [ "$INTEL_PANEL_CHOICE" != ask ] || INTEL_PANEL_CHOICE=yes
 fi
 if [ "$INTEL_PANEL_CHOICE" = ask ] && [ -d "$HERE/Optional/NMIntelFB.kext" ]; then
   printf '\n%s\n' '----------------------------------------------------------------------'
-  echo "Optional Intel laptop panel support (experimental):"
+  echo "可选的 Intel 笔记本内屏支持（实验性）："
   printf '%s\n\n' '----------------------------------------------------------------------'
-  echo "Use only for a laptop whose built-in screen is wired to an Intel GPU unsupported by macOS."
-  echo "Skip for desktops, Apple-supported Intel graphics, or a panel driven directly by NVIDIA."
-  echo "This adopts the firmware display mode; NVIDIA-to-Intel panel acceleration is still disabled by default."
+  echo "仅用于内置屏连接到 macOS 不支持的 Intel GPU 的笔记本。"
+  echo "台式机、macOS 支持的 Intel 显卡，或由 NVIDIA 直接驱动内屏的设备请跳过。"
+  echo "此选项沿用固件显示模式；NVIDIA 到 Intel 的内屏加速仍默认关闭。"
   if [ -t 0 ]; then
-    printf 'Install NMIntelFB for this laptop panel? [y/N] '
+    printf '是否为此笔记本内屏安装 NMIntelFB？[y/N] '
     answer=""; IFS= read -r answer || answer=""
     case "$answer" in y|Y|yes|YES|Yes) INTEL_PANEL_CHOICE=yes;; *) INTEL_PANEL_CHOICE=no;; esac
   else
-    echo "No interactive input: Intel panel support skipped (use --intel-panel=yes to opt in)."
+    echo "No interactive input: 未提供交互输入，已跳过 Intel 内屏支持（使用 --intel-panel=yes 可启用）。"
     INTEL_PANEL_CHOICE=no
   fi
 fi
 if [ "$INTEL_PANEL_CHOICE" = yes ]; then
   [ -d "$HERE/Optional/NMIntelFB.kext" ] && [ ! -L "$HERE/Optional/NMIntelFB.kext" ] \
-    || die "this package lacks the optional Intel panel kext"
+    || die "此软件包缺少可选的 Intel 内屏 kext"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMIntelFB.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMIntelFB ] \
-    || die "invalid optional Intel panel bundle identity"
-  codesign --verify --strict "$HERE/Optional/NMIntelFB.kext" || die "invalid Intel panel kext signature"
+    || die "可选 Intel 内屏组件的 Bundle 标识无效"
+  codesign --verify --strict "$HERE/Optional/NMIntelFB.kext" || die "Intel 内屏 kext 签名无效"
   KEXTS="$KEXTS NMIntelFB"; INTEL_PANEL=1; INTEL_PANEL_TOUCHED=1
-  ok "experimental Intel panel support selected; an existing opt-in is kept on updates"
+  ok "已选择实验性 Intel 内屏支持；更新时会保留此前的启用设置"
 elif [ -d "$EXT/NMIntelFB.kext" ]; then
   REMOVED_KEXTS=NMIntelFB; INTEL_PANEL_TOUCHED=1
-  ok "Intel panel support will be removed; the previous copy is backed up"
+  ok "将移除 Intel 内屏支持；旧版本已备份"
 fi
 # NMXAudio is a separate, optional HD Audio driver for Tahoe. Never infer an
 # opt-in from a detected controller or take ownership of another installation.
@@ -300,63 +300,63 @@ if [ "$AUDIO_CHOICE" = ask ]; then
   if [ "$MAJ" -ge 26 ] && [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -e "$EXT/NMXAudio.kext" ] &&
      ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>'; then
     printf '\n%s\n' '----------------------------------------------------------------------'
-    echo "Optional NMXAudio HD Audio driver (Tahoe only). Skip if your audio already works."
+    echo "可选的 NMXAudio 高清音频驱动（仅 Tahoe）。如果音频已正常工作，请跳过。"
     printf '%s\n\n' '----------------------------------------------------------------------'
     if [ -t 0 ]; then
-      printf 'Install the optional audio driver? [y/N] '
+      printf '是否安装可选音频驱动？[y/N] '
       answer=""; IFS= read -r answer || answer=""
       case "$answer" in y|Y|yes|YES|Yes) AUDIO_CHOICE=yes;; esac
     else
-      echo "No interactive input: audio support skipped (use --audio=yes to opt in)."
+      echo "No interactive input: 未提供交互输入，已跳过音频支持（使用 --audio=yes 可启用）。"
     fi
   fi
 fi
 if [ "$AUDIO_CHOICE" = yes ]; then
-  [ "$MAJ" -ge 26 ] || die "the optional audio driver requires macOS Tahoe; use --audio=no on Sequoia"
+  [ "$MAJ" -ge 26 ] || die "可选音频驱动需要 macOS Tahoe；在 Sequoia 上请使用 --audio=no"
   [ "$AUDIO_OWNED" = 1 ] || { [ ! -e "$EXT/NMXAudio.kext" ] && [ ! -L "$EXT/NMXAudio.kext" ]; } \
-    || die "NMXAudio is installed independently or changed; it was left untouched (use --audio=no)"
+    || die "NMXAudio 是独立安装的或已被修改，已保持原样（请使用 --audio=no）"
   [ -d "$HERE/Optional/NMXAudio.kext" ] && [ ! -L "$HERE/Optional/NMXAudio.kext" ] \
-    || die "this package lacks the optional audio driver"
+    || die "此软件包缺少可选音频驱动"
   [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HERE/Optional/NMXAudio.kext/Contents/Info.plist" 2>/dev/null)" = com.nullmoth.NMXAudio ] \
-    || die "invalid optional audio bundle identity"
+    || die "可选音频组件的 Bundle 标识无效"
   ioreg -r -c IOPCIDevice -l -w0 2>/dev/null | grep -q '"class-code" = <00030400>' \
-    || die "no PCI HD Audio controller found; use --audio=no"
+    || die "未检测到 PCI 高清音频控制器；请使用 --audio=no"
   KEXTS="$KEXTS NMXAudio"; AUDIO=1; AUDIO_TOUCHED=1
-  ok "optional audio selected; existing driver-managed opt-ins are kept on updates"
+  ok "已选择可选音频驱动；更新时会保留此前由驱动管理的启用设置"
 elif [ "$AUDIO_OWNED" = 1 ]; then
   REMOVED_KEXTS="$REMOVED_KEXTS NMXAudio"; AUDIO_TOUCHED=1
-  ok "driver-managed audio will be removed; independent audio drivers are kept"
+  ok "将移除由本驱动管理的音频组件；独立安装的音频驱动会保留"
 fi
 GLD_BUNDLE=""
 if [ -d "$HERE/Library/GPUBundles/NVKZinkGLDriver.bundle" ]; then
   GLD_BUNDLE=NVKZinkGLDriver.bundle
   selected_gl=$(/usr/libexec/PlistBuddy -c 'Print :IOKitPersonalities:NVAccel:IOGLBundleName' "$VAR/NVAccel.kext/Contents/Info.plist" 2>/dev/null || true)
-  [ "$selected_gl" = NVKZinkGLDriver ] || die "this package does not enable native Zink for macOS $MAJ (no driver changes made)"
-  [ -x "$HERE/Library/GPUBundles/nvmtl/zink/gld_bundle_probe" ] || die "native GLD lookup checker is missing"
+  [ "$selected_gl" = NVKZinkGLDriver ] || die "此软件包未为 macOS $MAJ 启用原生 Zink（未更改驱动）"
+  [ -x "$HERE/Library/GPUBundles/nvmtl/zink/gld_bundle_probe" ] || die "缺少原生 GLD 查找检查工具"
 fi
 RUNTIME_PREFLIGHT="$SELF/nullmoth-runtime-check.sh"
-[ -x "$RUNTIME_PREFLIGHT" ] || die "runtime compatibility checker is missing"
-/bin/bash "$RUNTIME_PREFLIGHT" "$HERE" "$v" || die "userland runtime cannot load on this macOS version"
+[ -x "$RUNTIME_PREFLIGHT" ] || die "缺少运行环境兼容性检查工具"
+/bin/bash "$RUNTIME_PREFLIGHT" "$HERE" "$v" || die "用户态运行组件无法在此 macOS 版本上加载"
 
 require_install_directory() {
   local metadata permissions entry listing grants
-  [ ! -L "$1" ] && [ -d "$1" ] || die "installer parent must be a real directory (no driver changes made)"
-  metadata=$(stat -f '%u %Lp' "$1" 2>/dev/null) || die "cannot verify installer parent ownership"
+  [ ! -L "$1" ] && [ -d "$1" ] || die "安装器所在目录必须是实际目录（未更改驱动）"
+  metadata=$(stat -f '%u %Lp' "$1" 2>/dev/null) || die "无法验证安装器所在目录的所有权"
   case "$metadata" in
     "0 "[0-7][0-7][0-7]|"0 "[0-7][0-7][0-7][0-7]) ;;
-    *) die "installer parent is not a verified root-owned directory (no driver changes made)";;
+    *) die "安装器所在目录不是已验证的 root 所有目录（未更改驱动）";;
   esac
   permissions=${metadata#* }
-  [ $((8#$permissions & 022)) -eq 0 ] || die "installer parent is writable by another account or group (no driver changes made)"
+  [ $((8#$permissions & 022)) -eq 0 ] || die "其他账户或用户组可以写入安装器所在目录（未更改驱动）"
   listing=$(ls -lde "$1" 2>/dev/null)
   entry=$(printf '%s\n' "$listing" | head -1 | awk '{print $1}')
-  [ -n "$entry" ] || die "cannot inspect installer parent access controls"
+  [ -n "$entry" ] || die "无法检查安装器所在目录的访问控制设置"
   # A deny entry only takes access away (some Macs carry "group:everyone deny delete" on /Library); an allow entry can
   # hand another account write access the mode bits above never show, so any allow entry still stops the install and
   # is named in the log.
   case "$entry" in *+*)
     grants=$(printf '%s\n' "$listing" | tail -n +2 | grep -E '^[[:space:]]*[0-9]+:.*[[:space:]]allow[[:space:]]' || true)
-    [ -z "$grants" ] || die "installer parent $1 has access-control entries that allow access ($(printf '%s' "$grants" | tr -s ' \n' ' ')) (no driver changes made)"
+    [ -z "$grants" ] || die "安装器所在目录 $1 存在授予访问权限的访问控制项（$(printf '%s' "$grants" | tr -s ' \n' ' ')）（未更改驱动）"
     ;;
   esac
 }
@@ -366,17 +366,17 @@ require_install_directory() {
 if [ "${CHECK:-0}" != 1 ]; then
   require_install_directory /Library
   if [ ! -e /Library/NullMoth ] && [ ! -L /Library/NullMoth ]; then
-    mkdir -m 755 /Library/NullMoth || die "create installer state directory"
+    mkdir -m 755 /Library/NullMoth || die "无法创建安装器状态目录"
   fi
   require_install_directory /Library/NullMoth
   if ! mkdir -m 700 "$LOCKDIR" 2>/dev/null; then
     recover_stale_guard
-    mkdir -m 700 "$LOCKDIR" 2>/dev/null || die "installer guard already exists; another install is active right now (no driver changes made)"
+    mkdir -m 700 "$LOCKDIR" 2>/dev/null || die "安装保护标记已存在；当前已有另一个安装任务正在运行（未更改驱动）"
   fi
   LOCK_HELD=1
-  printf 'pid=%s\nboot=%s\n' "$$" "$(boot_sec)" > "$LOCKDIR/owner" || die "cannot record the installer guard's owner"
-  LOCK_ID=$(stat -f '%d:%i' "$LOCKDIR" 2>/dev/null) || die "cannot record installer guard identity"
-  printf '%s\n' "$LOCK_ID" | grep -Eq '^[0-9]+:[0-9]+$' || die "installer guard identity is unavailable"
+  printf 'pid=%s\nboot=%s\n' "$$" "$(boot_sec)" > "$LOCKDIR/owner" || die "无法记录安装保护标记的所有者"
+  LOCK_ID=$(stat -f '%d:%i' "$LOCKDIR" 2>/dev/null) || die "无法记录安装保护标记的身份"
+  printf '%s\n' "$LOCK_ID" | grep -Eq '^[0-9]+:[0-9]+$' || die "安装保护标记的身份不可用"
 fi
 
 primary_bundle_id() {
@@ -417,14 +417,14 @@ PRIMARY=0
 primary_requested; primary_status=$?
 case "$primary_status" in
  0) PRIMARY=1;;
- 2) die "incomplete primary-GPU matching on installed kexts; no files changed";;
+ 2) die "已安装的 kext 中主 GPU 匹配设置不完整；未更改任何文件";;
 esac
 SELECTOR_SOURCE=""
 if [ "$PRIMARY" = 1 ]; then
   SELECTOR_SOURCE="$HERE/Library/Extensions/NVPrimarySelector.kext"
   [ -d "$SELECTOR_SOURCE" ] || SELECTOR_SOURCE="$EXT/NVPrimarySelector.kext"
-  [ -d "$SELECTOR_SOURCE" ] && [ ! -L "$SELECTOR_SOURCE" ] || die "primary-GPU matching needs NVPrimarySelector.kext; no files changed"
-  codesign --verify --strict "$SELECTOR_SOURCE" || die "primary selector signature invalid; no files changed"
+  [ -d "$SELECTOR_SOURCE" ] && [ ! -L "$SELECTOR_SOURCE" ] || die "主 GPU 匹配需要 NVPrimarySelector.kext；未更改任何文件"
+  codesign --verify --strict "$SELECTOR_SOURCE" || die "主 GPU 选择器签名无效；未更改任何文件"
   KEXTS="$KEXTS NVPrimarySelector"
 fi
 # kmutil builds the auxiliary collection from every kext in /Library/Extensions, so one that names a dependency this
@@ -442,7 +442,7 @@ kmutil_blocker() {  # <kmutil log> <extensions folder>: prints a sentence for th
     [ -f "$x/Contents/Info.plist" ] || continue
     [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$x/Contents/Info.plist" 2>/dev/null)" = "$id" ] && { path=$x; break; }
   done
-  printf '%s needs %s, which this macOS does not have, so macOS cannot build a kernel collection while it is there. It is not part of this driver. Move %s out of %s (or load it from OpenCore instead), then run 1401 again' \
+  printf '%s 需要依赖 %s，但当前 macOS 不包含该依赖，因此它留在此处时 macOS 无法构建内核集合。它不属于本驱动。请将 %s 移出 %s（或改为通过 OpenCore 加载），然后重新运行 1401。' \
     "$id" "$dep" "${path:-the kext with that identifier}" "$ext"
 }
 # Shared with uninstall.sh: resolve old staging references by bundle identity,
@@ -467,30 +467,30 @@ permanent_kext_path() {
     [ -n "$wanted_version" ] && [ "$version" = "$wanted_version" ] || continue
     resolved=$(cd "$candidate" && pwd -P) || return 1
     if [ -n "$found" ] && [ "$found" != "$resolved" ]; then
-      echo "Ambiguous installed copies of $wanted_id version $wanted_version" >&2; return 1
+      echo "发现多个已安装的 $wanted_id $wanted_version 版本，无法确定要使用哪一个。" >&2; return 1
     fi
     found=$resolved
   done
-  [ -n "$found" ] || { echo "No installed match for $wanted_id version $wanted_version (recorded at $recorded)" >&2; return 1; }
+  [ -n "$found" ] || { echo "未找到 $wanted_id $wanted_version 的已安装版本（记录路径：${recorded}）。" >&2; return 1; }
   printf '%s\n' "$found"
 }
 
-step "3. test kernel collection"
-T=$(mktemp -d /var/tmp/nullmoth.XXXX) && [ -n "$T" ] && mkdir -p "$T/repo" || die "create private preflight directory"
+step "3. 测试内核集合"
+T=$(mktemp -d /var/tmp/nullmoth.XXXX) && [ -n "$T" ] && mkdir -p "$T/repo" || die "无法创建预检临时目录"
 # Preserve installed extensions outside the default repositories (for example
 # MacPorts macFUSE). Rebuilding only /Library/Extensions silently drops them.
 # Use their permanent paths, not disposable preflight/staging copies.
 EXTERNAL_KEXT_ARGS=(); EXTERNAL_KEXT_IDS=""
 if [ -s "$KC" ]; then
   kmutil inspect -a x86_64 -A "$KC" --show-extension-info > "$T/existing-kexts" 2>/dev/null \
-    || die "cannot inspect the existing collection before preserving external extensions"
+    || die "无法检查现有内核集合，不能保留外部扩展"
   while IFS=$'\t' read -r external_id external_version external_path external_rest; do
     case "$external_path" in *.kext) ;; *) continue;; esac
     case "$external_path" in "$EXT"/*|/Library/Apple/System/Library/Extensions/*|/System/*) continue;; esac
-    printf '%s' "$external_id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "invalid external extension identity"
+    printf '%s' "$external_id" | grep -Eq '^[A-Za-z0-9_.-]+$' || die "外部扩展的标识无效"
     case "$external_id" in com.nullmoth.NVRM|com.nullmoth.NVAccel|com.nullmoth.NVRMFB|com.nullmoth.NVRMAGDC|com.nullmoth.NMIntelFB) continue;; esac
     permanent_path=$(permanent_kext_path "$external_id" "$external_version" "$external_path") \
-      || die "cannot preserve existing extension $external_id from a permanent installed path"
+      || die "无法从永久安装路径保留现有扩展 $external_id"
     parent=$permanent_path
     while :; do
       require_install_directory "$parent"
@@ -501,37 +501,37 @@ if [ -s "$KC" ]; then
     EXTERNAL_KEXT_IDS="$EXTERNAL_KEXT_IDS $external_id"
   done < "$T/existing-kexts"
 fi
-for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS $REMOVED_KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "stage third-party kext $n";; esac; done
-for k in $KEXTS; do cp -R "$(kpath $k)" "$T/repo/" || die "copy $k"; done
+for x in "$EXT"/*.kext; do [ -d "$x" ] || continue; n=$(basename "$x" .kext); case " $KEXTS $REMOVED_KEXTS " in *" $n "*) ;; *) cp -R "$x" "$T/repo/" || die "无法暂存第三方 kext $n";; esac; done
+for k in $KEXTS; do cp -R "$(kpath $k)" "$T/repo/" || die "无法复制 $k"; done
 if [ "$PRIMARY" = 1 ]; then
   primary_apply "$T/repo/NVRM.kext" NVRM && primary_apply "$T/repo/NVAccel.kext" NVAccel \
-    || die "prepare primary-GPU metadata; no installed files changed"
+      || die "无法准备主 GPU 元数据；未更改已安装文件"
 fi
 # macOS 26 kmutil silently skips kexts not owned by root ("No binaries or codeless kexts were provided").
-chown -R root:wheel "$T/repo" && chmod -R go-w "$T/repo" || die "preflight kext permissions"
-kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$T/repo" ${EXTERNAL_KEXT_ARGS[@]+"${EXTERNAL_KEXT_ARGS[@]}"} -A "$T/aux.kc" -z >"$T/kmutil.log" 2>&1 || { tail -20 "$T/kmutil.log"; why=$(kmutil_blocker "$T/kmutil.log" "$EXT"); die "test kernel collection build failed${why:+: $why}"; }
-[ -s "$T/aux.kc" ] || die "test kernel collection build produced no output"
-INS=$(kmutil inspect -a x86_64 -A "$T/aux.kc" 2>/dev/null) || die "cannot inspect the test kernel collection"
-for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || { tail -20 "$T/kmutil.log"; die "kmutil refused com.nullmoth.$k (log above)"; }; done
+chown -R root:wheel "$T/repo" && chmod -R go-w "$T/repo" || die "无法设置预检 kext 的权限"
+kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$T/repo" ${EXTERNAL_KEXT_ARGS[@]+"${EXTERNAL_KEXT_ARGS[@]}"} -A "$T/aux.kc" -z >"$T/kmutil.log" 2>&1 || { tail -20 "$T/kmutil.log"; why=$(kmutil_blocker "$T/kmutil.log" "$EXT"); die "内核集合测试构建失败${why:+：$why}"; }
+[ -s "$T/aux.kc" ] || die "内核集合测试构建未生成结果文件"
+INS=$(kmutil inspect -a x86_64 -A "$T/aux.kc" 2>/dev/null) || die "无法检查测试内核集合"
+for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || { tail -20 "$T/kmutil.log"; die "kmutil 未接受 com.nullmoth.${k}（见上方日志）"; }; done
 for k in $REMOVED_KEXTS; do
   if printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "$(primary_bundle_id "$k")"; then
-    die "test collection retained deselected $k; no installed files changed"
+    die "测试集合仍包含已取消选择的 ${k}；未更改已安装文件"
   fi
 done
 for external_id in $EXTERNAL_KEXT_IDS; do
-  printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "test collection dropped $external_id"
+  printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "测试集合未包含 $external_id"
 done
-ok "test collection holds all selected kexts"
+ok "测试集合已包含所有选定的 kext"
 [ "${CHECK:-0}" = 1 ] && { rm -rf "$T"; echo; echo "CHECK PASS (nothing changed)"; exit 0; }
 
-BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "create unique backup directory"
-[ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "cannot record the backup in the installer guard"
-step "4. back up what is there now -> $BK"
-printf '%s\n' "$BUILD" > "$BK/macos-build" || die "record backup macOS build"
-[ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "record primary selector backup"
-[ "$INTEL_PANEL_TOUCHED" != 1 ] || touch "$BK/intel-panel-touched" || die "record Intel panel rollback"
+BK=$(mktemp -d "/Library/NullMoth/backup-$(date +%Y%m%d-%H%M%S).XXXXXX") && [ -n "$BK" ] && [ -d "$BK" ] || die "无法创建唯一的备份目录"
+[ "${CHECK:-0}" = 1 ] || printf 'bk=%s\n' "$BK" >> "$LOCKDIR/owner" || die "无法在安装保护标记中记录备份位置"
+step "4. 备份当前文件 -> $BK"
+printf '%s\n' "$BUILD" > "$BK/macos-build" || die "无法记录备份对应的 macOS 构建版本"
+[ "$PRIMARY" != 1 ] || touch "$BK/primary-selector-used" || die "无法记录主 GPU 选择器备份"
+[ "$INTEL_PANEL_TOUCHED" != 1 ] || touch "$BK/intel-panel-touched" || die "无法记录 Intel 内屏回滚状态"
 if [ "$AUDIO_TOUCHED" = 1 ]; then
-  touch "$BK/audio-touched" || die "record audio rollback"
+  touch "$BK/audio-touched" || die "无法记录音频组件回滚状态"
   [ ! -f "$AUDIO_MARKER" ] || backup_copy "audio opt-in" cp -p "$AUDIO_MARKER" "$BK/nvidia-audio.sha256"
 fi
 CHANGED_KEXTS="$KEXTS${REMOVED_KEXTS:+ $REMOVED_KEXTS}"
@@ -554,45 +554,45 @@ if [ -d "$FW" ]; then backup_copy firmware ditto "$FW" "$BK/nvfw"
 # kernel reads.
 elif [ -d "$FWOLD" ] && [ ! -L "$FWOLD" ] && [ "$(stat -f '%u %Lp' "$FWOLD" | awk '{g=substr($2,length($2)-1,1); o=substr($2,length($2),1); print ($1==0 && g !~ /[2367]/ && o !~ /[2367]/) ? "ours" : "not"}')" = ours ]; then backup_copy firmware ditto "$FWOLD" "$BK/nvfw"
 fi
-ok "backup written"
+ok "备份已完成"
 
-step "5. install"
+step "5. 安装"
 INSTALLING=1; [ "${CHECK:-0}" = 1 ] || : > "$LOCKDIR/installing"
-for k in $REMOVED_KEXTS; do rm -rf "$EXT/$k.kext" || die "remove $k (restore from $BK)"; done
+for k in $REMOVED_KEXTS; do rm -rf "$EXT/$k.kext" || die "无法移除 ${k}（从 ${BK} 恢复）"; done
 for k in $KEXTS; do
   source=$(kpath "$k")
   if [ "$PRIMARY" = 1 ]; then source="$T/repo/$k.kext"; fi
-  rm -rf "$EXT/$k.kext" && ditto "$source" "$EXT/$k.kext" || die "copy $k (restore from $BK)"
+  rm -rf "$EXT/$k.kext" && ditto "$source" "$EXT/$k.kext" || die "无法复制 ${k}（从 ${BK} 恢复）"
 done
 # both NVAccel builds stay on disk, so the first start after a macOS upgrade can switch to the matching one
-mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "copy per-macOS accelerators (restore from $BK)"
+mkdir -p /Library/NullMoth && rm -rf /Library/NullMoth/kexts && ditto "$HERE/Library/NullMoth/kexts" /Library/NullMoth/kexts || die "无法复制各 macOS 版本的图形加速组件（从 $BK 恢复）"
 for target in 15 26; do
   dir=/Library/NullMoth/kexts/$target
   if [ "$PRIMARY" = 1 ]; then
-    primary_apply "$dir/NVAccel.kext" NVAccel || die "primary-GPU cache metadata for $target (restore from $BK)"
+    primary_apply "$dir/NVAccel.kext" NVAccel || die "无法写入 macOS $target 的主 GPU 缓存元数据（从 $BK 恢复）"
   fi
-  [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "missing macOS $target accelerator (restore from $BK)"
-  (cd "$dir" && find NVAccel.kext -type f -exec shasum -a 256 '{}' \;) > "$dir/SHA256SUMS" || die "cache manifest for macOS $target"
+  [ -f "$dir/NVAccel.kext/Contents/MacOS/NVAccel" ] && [ -f "$dir/NVAccel.kext/Contents/Info.plist" ] || die "缺少 macOS $target 图形加速组件（从 $BK 恢复）"
+  (cd "$dir" && find NVAccel.kext -type f -exec shasum -a 256 '{}' \;) > "$dir/SHA256SUMS" || die "无法生成 macOS $target 的缓存校验清单"
 done
-chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "cached accelerator permissions"
-echo "$MAJ" > /Library/NullMoth/os-major || die "record selected OS"
-mkdir -p "$GB" || die "create the bundle directory"
+chown -R root:wheel /Library/NullMoth/kexts && chmod -R go-w /Library/NullMoth/kexts || die "无法设置缓存图形加速组件的权限"
+echo "$MAJ" > /Library/NullMoth/os-major || die "无法记录当前 macOS 版本"
+mkdir -p "$GB" || die "无法创建图形组件目录"
 # The card runs these images and the kernel reads them, so this directory must be ours. It used to live in
 # /Users/Shared, which is world-writable (1777): a directory left there by anyone else was adopted as-is,
 # because the only permission step was a chmod that adds read bits and never takes write away. Refuse
 # anything we did not make, the way the shader caches already refuse a cache someone else could have written.
 if [ -e "$FW" ] && [ -n "$(find "$FW" -maxdepth 0 \( ! -user root -o -perm -o+w -o -perm -g+w \) -print -quit 2>/dev/null)" ]; then
-  rm -rf "$FW" || die "clear a firmware directory that was not root-owned"
-  echo "   note: the firmware folder was writable by other users; it has been replaced"
+  rm -rf "$FW" || die "无法清除非 root 所有的固件目录"
+  echo "   note: 固件目录对其他用户开放了写入权限，现已重新创建"
 fi
-mkdir -p "$FW" || die "create the firmware directory"
+mkdir -p "$FW" || die "无法创建固件目录"
 # $GB/nvmtl is replaced wholesale below, so move the shared shader caches aside first. NVMTLLibraryLoad.m
 # reads them from NVMTL_AIRCACHE_DIR (/Library/GPUBundles/nvmtl/aircache) and uses that path whenever it is
 # writable, which is what lets every process - WindowServer included - share one persistent cache instead of
 # compiling into a private one that a reboot or a temp sweep throws away.
 CACHEKEPT=""
 for c in aircache spvcache; do
-  [ ! -d "$GB/nvmtl/$c" ] || { mv "$GB/nvmtl/$c" "$T/keep-$c" && CACHEKEPT="$CACHEKEPT $c" || die "stash $GB/nvmtl/$c"; }
+  [ ! -d "$GB/nvmtl/$c" ] || { mv "$GB/nvmtl/$c" "$T/keep-$c" && CACHEKEPT="$CACHEKEPT $c" || die "无法暂存 $GB/nvmtl/$c"; }
 done
 # A user's own settings survive updates: the lines between these two markers in nvrm610.conf are put back after the
 # copy below. An RTX 3050 (GA106, GH #130) ran only with NVMTL_NO_SURFACE_PAGEOFF=1 and uncached command pools, and every
@@ -600,23 +600,23 @@ done
 MYCONF_START='# --- my settings, kept on update ---'; MYCONF_END='# --- end my settings ---'
 [ ! -f "$GB/nvmtl/nvrm610.conf" ] || sed -n "/^$MYCONF_START\$/,/^$MYCONF_END\$/p" "$GB/nvmtl/nvrm610.conf" \
   | grep -E "^($MYCONF_START|$MYCONF_END|(NVMTL|NVK|NVRM)_[A-Z0-9_]+=[A-Za-z0-9._-]{0,64})\$" > "$T/my-conf" || : > "$T/my-conf"
-for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl ${GLD_BUNDLE:+"$GLD_BUNDLE"}; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "copy $b (restore from $BK)"; done
-[ -n "$GLD_BUNDLE" ] || rm -rf "$GB/NVKZinkGLDriver.bundle" || die "remove previous optional OpenGL bundle (restore from $BK)"
+for b in NVMTLDriver.bundle NVIDIAShared.bundle nvmtl ${GLD_BUNDLE:+"$GLD_BUNDLE"}; do rm -rf "$GB/$b" && ditto "$HERE/Library/GPUBundles/$b" "$GB/$b" || die "无法复制 ${b}（从 ${BK} 恢复）"; done
+[ -n "$GLD_BUNDLE" ] || rm -rf "$GB/NVKZinkGLDriver.bundle" || die "无法移除旧的可选 OpenGL 组件（从 $BK 恢复）"
 if [ -s "$T/my-conf" ] && [ -f "$GB/nvmtl/nvrm610.conf" ]; then
-  cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "keep your settings in nvrm610.conf (restore from $BK)"
-  ok "kept your settings in nvrm610.conf ($(grep -cvE '^#' "$T/my-conf") line(s))"
+  cat "$T/my-conf" >> "$GB/nvmtl/nvrm610.conf" || die "无法保留 nvrm610.conf 中的自定义设置（从 $BK 恢复）"
+  ok "已保留 nvrm610.conf 中的自定义设置（$(grep -cvE '^#' "$T/my-conf") 行）"
 fi
 # nvmtl was just replaced wholesale: when the separate AMD/Intel driver is installed, its Vulkan drivers (which its
 # own installer put in /Library/NullMoth/gpu-userland) go back in beside NVK
 if [ -d "$EXT/NMXGPU.kext" ] && [ -d /Library/NullMoth/gpu-userland ]; then
-  ditto /Library/NullMoth/gpu-userland "$GB/nvmtl" || die "copy the AMD/Intel Vulkan drivers (restore from $BK)"
+  ditto /Library/NullMoth/gpu-userland "$GB/nvmtl" || die "无法复制 AMD/Intel Vulkan 驱动（从 $BK 恢复）"
 fi
-cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "copy bundle allow list"
-ditto "$HERE/Users/Shared/nvfw" "$FW" || die "copy firmware"
-chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "firmware permissions"
+cp "$HERE/Library/GPUBundles/nvmtl-allow.txt" "$GB/" || die "无法复制图形组件许可列表"
+ditto "$HERE/Users/Shared/nvfw" "$FW" || die "无法复制固件"
+chown -R root:wheel "$FW" && chmod -R go-w,a+rX "$FW" || die "无法设置固件权限"
 # nothing reads the old location any more; leaving it behind leaves a writable folder with our name on it
 rm -rf "$FWOLD" 2>/dev/null || true
-for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "permissions for $k"; done
+for k in $KEXTS; do chown -R root:wheel "$EXT/$k.kext" && chmod -R 755 "$EXT/$k.kext" || die "无法设置 $k 的权限"; done
 # An update replaces kexts the user already allowed. macOS keeps that approval per bundle (kext_policy; these kexts have
 # no team) and the code hash of the copy it last loaded from each path (kext_load_history_v3). For a kext the user
 # already allowed at this path, record the new hash, so the record matches what the next start loads. A kext never
@@ -635,21 +635,21 @@ if [ -f "$KPDB" ] && [ -x /usr/bin/sqlite3 ]; then
     ch=$(codesign -dvvv "$p" 2>&1 | awk -F= '/^CDHash=/{print $2; exit}')
     printf '%s' "$ch" | grep -Eq '^[0-9a-f]{40}$' || continue
     /usr/bin/sqlite3 "$KPDB" "update kext_load_history_v3 set cdhash='$ch' where path='$p' and bundle_id='$id' and ifnull(team_id,'')=''" 2>/dev/null \
-      || echo "   note: the approval record for $k is read-only here; macOS may ask to allow it again"
+      || echo "   note: $k 的批准记录当前为只读；macOS 可能会再次要求批准"
   done
 fi
-chown -R root:wheel ${GLD_BUNDLE:+"$GB/$GLD_BUNDLE"} "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "bundle permissions"
+chown -R root:wheel ${GLD_BUNDLE:+"$GB/$GLD_BUNDLE"} "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" "$GB/nvmtl-allow.txt" || die "无法设置图形组件权限"
 # WindowServer runs as _windowserver and must read the bundles and the allow list. WAS: cp under the app's privileged
 # helper (umask 077) left nvmtl-allow.txt at 0600, WindowServer got no Metal device, and CoreDisplay aborted
 # ("Failed to create MetalDevice") on every start: the crash loop after install on many machines.
-chmod -R go-w,a+rX ${GLD_BUNDLE:+"$GB/$GLD_BUNDLE"} "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "bundle permissions"
-sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer cannot read $GB/nvmtl-allow.txt (restore from $BK)"
+chmod -R go-w,a+rX ${GLD_BUNDLE:+"$GB/$GLD_BUNDLE"} "$GB/NVMTLDriver.bundle" "$GB/NVIDIAShared.bundle" "$GB/nvmtl" && chmod 644 "$GB/nvmtl-allow.txt" || die "无法设置图形组件权限"
+sudo -u _windowserver /bin/test -r "$GB/nvmtl-allow.txt" || die "WindowServer 无法读取 $GB/nvmtl-allow.txt（从 $BK 恢复）"
 # Create the shared shader caches the plugin looks for. Without them NVMTL_AIRCACHE_DIR never resolves, so
 # WindowServer, which compiles the compositor's pipelines on demand, re-translates them from scratch at every start
 # and its content renders black until the translation finishes (community patch #19; ownership below).
 # NOTE: this must stay AFTER the "chmod -R go-w ... $GB/nvmtl" above. That recursive chmod would otherwise
 # strip the write bits back off aircache/spvcache and the shared cache would silently stop working.
-mkdir -p "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "create the shared shader caches"
+mkdir -p "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "无法创建共享着色器缓存目录"
 # Owned by WindowServer (_windowserver), writable by nobody else: WindowServer loads what is in these caches as
 # compiled shaders, so a cache any user can write (1777, as first proposed) would let a local user plant code into
 # WindowServer. Other processes see the folders read-only and keep their own private caches, which the plugin already
@@ -658,48 +658,48 @@ mkdir -p "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "create the shared sha
 for c in $CACHEKEPT; do
   [ -d "$T/keep-$c" ] || continue
   if [ -z "$(find "$T/keep-$c" \( ! -user _windowserver -o -perm -o+w -o -perm -g+w \) -print -quit 2>/dev/null)" ]; then
-    rm -rf "$GB/nvmtl/$c" && mv "$T/keep-$c" "$GB/nvmtl/$c" || die "restore $GB/nvmtl/$c"
-  else rm -rf "$T/keep-$c"; echo "   note: $c was writable by other users; starting it empty"; fi
+    rm -rf "$GB/nvmtl/$c" && mv "$T/keep-$c" "$GB/nvmtl/$c" || die "无法恢复 $GB/nvmtl/$c"
+  else rm -rf "$T/keep-$c"; echo "   note: $c 可被其他用户写入，现以空缓存启动"; fi
 done
-chown -R _windowserver:wheel "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "shader cache owner"
-chmod 0755 "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "shared shader cache permissions"
+chown -R _windowserver:wheel "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "无法设置着色器缓存所有者"
+chmod 0755 "$GB/nvmtl/aircache" "$GB/nvmtl/spvcache" || die "无法设置共享着色器缓存权限"
 if [ -n "$GLD_BUNDLE" ]; then
-  "$GB/nvmtl/zink/gld_bundle_probe" NVKZinkGLDriver || die "macOS does not trust the installed OpenGL bundle (restore from $BK)"
+  "$GB/nvmtl/zink/gld_bundle_probe" NVKZinkGLDriver || die "macOS 不信任已安装的 OpenGL 组件（从 $BK 恢复）"
 fi
 NEWKC="$KC.nullmoth-install-new"; rm -f "$NEWKC"
-kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$EXT" ${EXTERNAL_KEXT_ARGS[@]+"${EXTERNAL_KEXT_ARGS[@]}"} -A "$NEWKC" -z >"$T/kmutil2.log" 2>&1 || die "live kernel collection build failed (restore from $BK)"
-[ -s "$NEWKC" ] || die "live kernel collection build produced no output (restore from $BK)"
-INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "cannot inspect the new kernel collection (restore from $BK)"
-for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || die "com.nullmoth.$k missing from the new collection (restore from $BK)"; done
+kmutil create -n aux --volume-root / ${KARG[@]+"${KARG[@]}"} -B $KB -S $KS --repository "$EXT" ${EXTERNAL_KEXT_ARGS[@]+"${EXTERNAL_KEXT_ARGS[@]}"} -A "$NEWKC" -z >"$T/kmutil2.log" 2>&1 || die "正式内核集合构建失败（从 $BK 恢复）"
+[ -s "$NEWKC" ] || die "正式内核集合构建未生成结果文件（从 $BK 恢复）"
+INS=$(kmutil inspect -a x86_64 -A "$NEWKC" 2>/dev/null) || die "无法检查新内核集合（从 $BK 恢复）"
+for k in $KEXTS; do printf '%s\n' "$INS" | grep -oE '(com\.nullmoth\.[A-Za-z0-9]+|org\.hackintosh\.experimental\.NVPrimarySelector)' | grep -Fxq "$(primary_bundle_id "$k")" || die "新内核集合缺少 com.nullmoth.${k}（从 ${BK} 恢复）"; done
 for k in $REMOVED_KEXTS; do
   if printf '%s\n' "$INS" | grep -oE 'com\.nullmoth\.[A-Za-z0-9]+' | grep -Fxq "$(primary_bundle_id "$k")"; then
-    die "new collection retained deselected $k (restore from $BK)"
+    die "新内核集合仍包含已取消选择的 ${k}（从 ${BK} 恢复）"
   fi
 done
 for external_id in $EXTERNAL_KEXT_IDS; do
-  printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "new collection dropped $external_id (restore from $BK)"
+  printf '%s\n' "$INS" | awk '{print $1}' | grep -Fxq "$external_id" || die "新内核集合未包含 ${external_id}（从 ${BK} 恢复）"
 done
-mv -f "$NEWKC" "$KC" || die "cannot publish the new kernel collection (restore from $BK)"
+mv -f "$NEWKC" "$KC" || die "无法启用新内核集合（从 $BK 恢复）"
 INSTALLING=0
 rm -rf "$T"
-ok "installed"
+ok "安装完成"
 # Record the version for the app's update check. Only the app's setup wrote it, so installs from the release tar left it
 # empty and the app kept offering the version already installed (10-10 chat, 1.10.0).
 # the licences and notices of everything this package carries, beside the driver they cover
 if [ -d "$HERE/licenses" ]; then rm -rf /Library/NullMoth/licenses && ditto "$HERE/licenses" /Library/NullMoth/licenses \
-  && chmod -R go-w /Library/NullMoth/licenses || echo "   note: the licence texts could not be copied to /Library/NullMoth/licenses"; fi
+  && chmod -R go-w /Library/NullMoth/licenses || echo "   note: 无法将许可证文本复制到 /Library/NullMoth/licenses"; fi
 # /Library/NullMoth must stay traversable by every user: ARM apps' nm-arm lives under it and runs as the user. A root
 # shell with umask 077 (the Mac app's privileged steps) left it 700 in 2.7, which hid nm-arm from its own user.
-mkdir -p /Library/NullMoth && chmod 755 /Library/NullMoth || echo "   note: /Library/NullMoth could not be made readable (ARM apps may not start)"
+mkdir -p /Library/NullMoth && chmod 755 /Library/NullMoth || echo "   note: 无法设置 /Library/NullMoth 的读取权限（ARM 应用可能无法启动）"
 if [ -f "$HERE/VERSION" ]; then mkdir -p /Library/NullMoth && tr -cd '0-9.\n' < "$HERE/VERSION" | head -n 1 > /Library/NullMoth/driver-version.tmp \
   && chmod 644 /Library/NullMoth/driver-version.tmp && mv /Library/NullMoth/driver-version.tmp /Library/NullMoth/driver-version; fi
 
-step "6. boot-args"
+step "6. 启动参数"
 # A remove flag left by a boot-picker removal that did not finish keeps every NullMoth kext off at boot. Installing
 # again means the driver is wanted, so the flag goes; the boot picker sets it again when it is chosen.
 nvram -d 7C436110-AB2A-4BBB-A880-FE41995C9F82:nullmoth-remove 2>/dev/null || true
 
-step "6b. falling back to the previous driver if this one cannot start"
+step "6b. 新驱动无法启动时恢复旧驱动"
 # The kernel's boot guard (nvrm_off.h) turns the driver off after two starts in a row that never brought the display
 # up, so the Mac reaches a desktop on the firmware's framebuffer. This one-shot job then puts the previous driver back
 # from this install's backup and restarts once. It removes itself as soon as the new driver has shown its display
@@ -711,8 +711,8 @@ LG=/Library/NullMoth/lastgood.sh; LGP=/Library/LaunchDaemons/com.nullmoth.lastgo
 launchctl bootout system/com.nullmoth.lastgood 2>/dev/null || true
 rm -f "$LG" "$LGP"
 if [ -d "$BK/NVRM.kext" ]; then
-  mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the fallback job's folders"
-  cat > "$LG.tmp" <<EOF || die "write the fallback job"
+  mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "无法创建驱动回退任务所需的目录"
+  cat > "$LG.tmp" <<EOF || die "无法写入驱动回退任务"
 #!/bin/bash
 # Written by the NVIDIA driver install: restores the driver in $BK if the installed one cannot start.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -744,20 +744,20 @@ done_job
 echo "\$(date) previous driver restored; restarting" >> \$LOG
 shutdown -r now
 EOF
-  chmod 755 "$LG.tmp" && chown root:wheel "$LG.tmp" && mv -f "$LG.tmp" "$LG" || die "install the fallback job"
-  cat > "$LGP" <<EOF || die "write the fallback job's plist"
+  chmod 755 "$LG.tmp" && chown root:wheel "$LG.tmp" && mv -f "$LG.tmp" "$LG" || die "无法安装驱动回退任务"
+  cat > "$LGP" <<EOF || die "无法写入驱动回退任务的 plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.nullmoth.lastgood</string>
 <key>ProgramArguments</key><array><string>/bin/bash</string><string>$LG</string></array>
 <key>RunAtLoad</key><true/></dict></plist>
 EOF
-  chmod 644 "$LGP" && chown root:wheel "$LGP" || die "fallback job permissions"
-  ok "previous driver kept as the fallback ($BK)"
+  chmod 644 "$LGP" && chown root:wheel "$LGP" || die "无法设置驱动回退任务的权限"
+  ok "已将旧驱动保留为回退版本（${BK}）"
 else
-  ok "no previous driver to fall back to (first install)"
+  ok "没有可回退的旧驱动（首次安装）"
 fi
-step "6c. counting a start as good once the desktop is up"
+step "6c. 桌面启动后将本次启动标记为正常"
 # The kernel's guard only counts a start as good when the framebuffer lights a head, or when the card reports that none
 # of its connectors has a display. A laptop whose panel hangs off the integrated GPU reaches that report late and does
 # not always reach it: two boots that missed it switched a healthy driver off, leaving the Mac with no NVIDIA card in
@@ -765,8 +765,8 @@ step "6c. counting a start as good once the desktop is up"
 # reaches a desktop keeps its count, which is what the guard is for.
 BG=/Library/NullMoth/bootguard.sh; BGP=/Library/LaunchDaemons/com.nullmoth.bootguard.plist
 launchctl bootout system/com.nullmoth.bootguard 2>/dev/null || true
-mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "create the boot-guard job's folders"
-cat > "$BG.tmp" <<'EOF' || die "write the boot-guard job"
+mkdir -p /Library/NullMoth /Library/LaunchDaemons || die "无法创建启动保护任务所需的目录"
+cat > "$BG.tmp" <<'EOF' || die "无法写入启动保护任务"
 #!/bin/bash
 # Written by the NVIDIA driver install: the desktop came up, so this start counts as good.
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -785,16 +785,16 @@ while [ "$n" -lt 48 ]; do
 done
 echo "$(date) no desktop within four minutes; the start keeps its count" >> $LOG
 EOF
-chmod 755 "$BG.tmp" && chown root:wheel "$BG.tmp" && mv -f "$BG.tmp" "$BG" || die "install the boot-guard job"
-cat > "$BGP" <<EOF || die "write the boot-guard job's plist"
+chmod 755 "$BG.tmp" && chown root:wheel "$BG.tmp" && mv -f "$BG.tmp" "$BG" || die "无法安装启动保护任务"
+cat > "$BGP" <<EOF || die "无法写入启动保护任务的 plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>Label</key><string>com.nullmoth.bootguard</string>
 <key>ProgramArguments</key><array><string>/bin/bash</string><string>$BG</string></array>
 <key>RunAtLoad</key><true/></dict></plist>
 EOF
-chmod 644 "$BGP" && chown root:wheel "$BGP" || die "boot-guard job permissions"
-ok "a start counts as good once the desktop is up"
+chmod 644 "$BGP" && chown root:wheel "$BGP" || die "无法设置启动保护任务的权限"
+ok "桌面启动后将本次启动标记为正常"
 # A missing boot-args variable is empty only after a successful NVRAM listing.
 # A failed read must never become an empty value that we later overwrite.
 read_boot_args() {
@@ -803,13 +803,13 @@ read_boot_args() {
   printf '%s\n' "$listing" | sed -n $'s/^boot-args\t//p'
 }
 ba=$(read_boot_args) || ba=""
-for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: boot-args lack '$a' — add it in your OpenCore config.plist (README: Install — by hand), or let the 1401 Mac app set OpenCore up";; esac; done
+for a in nvfb=1 nvaccel=1; do case " $ba " in *" $a "*) ;; *) echo "   NOTE: 启动参数缺少 '$a'。请在 OpenCore config.plist 中添加（参见 README：手动安装）；如果另行安装了 1401 Mac App，也可用它设置 OpenCore。";; esac; done
 # WindowServer is a platform binary: with AMFI enforcing it refuses the Metal plugin ("mapping process is a platform
 # binary, but mapped file is not"), reaches the desktop with no Metal device and asserts "Failed to create MetalDevice".
 # Two reports had boot-args with nvfb/nvaccel but neither AMFI argument.
 amfi_note() {
   case " $1 " in *" amfi_get_out_of_my_way="*|*" amfi="*) ;;
-    *) echo "   NOTE: boot-args lack 'amfi_get_out_of_my_way=0x1 amfi=0x80' — without them WindowServer refuses the NVIDIA Metal plugin and the desktop has no Metal device; add them in your OpenCore config.plist, or let the 1401 Mac app set OpenCore up";;
+    *) echo "   NOTE: 启动参数缺少 'amfi_get_out_of_my_way=0x1 amfi=0x80'。缺少这些参数时，WindowServer 会拒绝加载 NVIDIA Metal 插件，桌面将没有 Metal 设备。请在 OpenCore config.plist 中添加；如果另行安装了 1401 Mac App，也可用它设置 OpenCore。";;
   esac
 }
 amfi_note "$ba"
@@ -848,13 +848,13 @@ weg_gfxrst_apply() {
     fi
     rm -f "$temporary"; return 1
   fi
-  echo "   WhateverGreen is loaded: added gfxrst=4 to the NVRAM boot-args (its boot screen copy can panic the Mac when the NVIDIA display first opens)"
+  echo "   已加载 WhateverGreen：已将 gfxrst=4 添加到 NVRAM 启动参数（NVIDIA 显示器首次开启时，WhateverGreen 的启动画面副本可能导致内核崩溃）。"
 }
 if kmutil showloaded --list-only --bundle-identifier as.vit9696.WhateverGreen 2>/dev/null | grep -q WhateverGreen; then
   nb=$(weg_gfxrst "$ba")
   if [ -n "$nb" ]; then
-    weg_gfxrst_apply "$ba" || echo "   NOTE: gfxrst=4 could not be added with its recovery record; check boot-args before rebooting."
-    echo "   NOTE: also add 'gfxrst=4' to boot-args in your OpenCore config.plist — a config that sets boot-args at every start replaces the NVRAM value"
+    weg_gfxrst_apply "$ba" || echo "   NOTE: 无法连同恢复记录一起添加 gfxrst=4；重启前请检查启动参数。"
+    echo "   NOTE: 还请在 OpenCore config.plist 启动参数中添加 'gfxrst=4'。每次启动都会设置启动参数的配置会覆盖 NVRAM 中的值。"
   fi
 fi
 
@@ -862,26 +862,26 @@ fi
 # the boot fallback restore this record together with the matching binary.
 if [ "$AUDIO_TOUCHED" = 1 ]; then
   if [ "$AUDIO" = 1 ]; then
-    audio_sum=$(shasum -a 256 "$EXT/NMXAudio.kext/Contents/MacOS/NMXAudio") || die "hash installed audio"
+    audio_sum=$(shasum -a 256 "$EXT/NMXAudio.kext/Contents/MacOS/NMXAudio") || die "无法计算已安装音频驱动的哈希值"
     audio_sum=${audio_sum%% *}
-    printf '%s' "$audio_sum" | grep -Eq '^[0-9a-f]{64}$' || die "invalid installed audio hash"
+    printf '%s' "$audio_sum" | grep -Eq '^[0-9a-f]{64}$' || die "已安装音频驱动的哈希值无效"
     (umask 077; printf '%s\n' "$audio_sum" > "$AUDIO_MARKER.tmp") \
       && chown root:wheel "$AUDIO_MARKER.tmp" && chmod 600 "$AUDIO_MARKER.tmp" && mv -f "$AUDIO_MARKER.tmp" "$AUDIO_MARKER" \
-      || die "record audio opt-in"
-  else rm -f "$AUDIO_MARKER" || die "remove audio opt-in"; fi
+      || die "无法记录音频启用状态"
+  else rm -f "$AUDIO_MARKER" || die "无法移除音频启用状态记录"; fi
 fi
 
 # Native MetalFX DLSS is independent of the Wine/NVK provider.
 choose_native_dlss() {
   printf '\n%s\n' '----------------------------------------------------------------------'
-  echo "   Optional native MetalFX DLSS (RTX 20 series or newer)."
+  echo "   可选的原生 MetalFX DLSS（RTX 20 系列及更新型号）。"
   printf '%s\n\n' '----------------------------------------------------------------------'
-  echo "   For native Mac games using MetalFX upscaling, denoising or frame interpolation."
-  echo "   Downloads about 750 MB of NVIDIA files and compiles GPU kernels; allow a few minutes and 2.5 GB free."
-  echo "   Wine/CrossOver DLSS uses the separate Wine/NVK setup and the game's original nvngx_dlss.dll."
+  echo "   供原生 Mac 游戏使用 MetalFX 超分辨率、降噪或帧生成。"
+  echo "   将下载约 750 MB 的 NVIDIA 文件并编译 GPU 内核；需要几分钟时间和 2.5 GB 可用空间。"
+  echo "   Wine/CrossOver 中的 DLSS 使用独立的 Wine/NVK 配置和游戏原版 nvngx_dlss.dll。"
   if [ "$DLSS_CHOICE" = ask ]; then
     if [ -t 0 ]; then
-      printf '   Install/update native MetalFX DLSS? [y/N] '
+      printf '   是否安装或更新原生 MetalFX DLSS？[y/N] '
       answer=''; IFS= read -r answer || answer=''
       case "$answer" in y|Y|yes|YES) DLSS_CHOICE=yes;; *) DLSS_CHOICE=no;; esac
     else
@@ -903,38 +903,38 @@ dlss_step_covered() {
   done
 }
 if [ -f "$HERE/dlss_fetch.sh" ] && ! dlss_step_covered; then
-  echo "   NOTE: this package's SHA256SUMS does not cover the DLSS step; skipping it."
+  echo "   NOTE: 此软件包的 SHA256SUMS 未覆盖 DLSS 安装步骤，已跳过。"
 elif [ -f "$HERE/dlss_fetch.sh" ]; then
   if choose_native_dlss; then
-    step "Native MetalFX DLSS 4 / 4.5 files"
-    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: the DLSS files were not installed; the driver itself is. Run again later: sudo ./install.sh --dlss=yes"
+    step "原生 MetalFX DLSS 4 / 4.5 文件"
+    /bin/bash "$HERE/dlss_fetch.sh" --yes || echo "   NOTE: DLSS 文件未能安装，但驱动已安装。稍后可重新运行：sudo ./install.sh --dlss=yes"
   else
-    echo "   Native MetalFX DLSS download/update skipped; existing DLSS files are kept. Wine/CrossOver setup is unchanged."
+    echo "   已跳过原生 MetalFX DLSS 的下载或更新；保留现有 DLSS 文件。Wine/CrossOver 配置不受影响。"
   fi
 fi
 
 # Optional WebKit helper lives in OpenCore, never the system kext repositories.
 # This runs after the driver transaction. EFI failures retain the working driver.
 webkit_manual() {
-  echo "   Manual Safari WebGL helper setup:"
-  printf '   Kext: %s/Optional/NVWebKitFixup/NVWebKitFixup.kext\n' "$SOURCE_PACKAGE"
-  echo "   Mount your OpenCore EFI and copy that kext to EFI/OC/Kexts/. Keep your installed Lilu."
-  echo "   Add/enable NVWebKitFixup in Kernel > Add immediately after Lilu:"
+  echo "   Safari WebGL 辅助组件手动安装说明："
+  printf '   kext 路径：%s/Optional/NVWebKitFixup/NVWebKitFixup.kext\n' "$SOURCE_PACKAGE"
+  echo "   挂载 OpenCore EFI，并将该 kext 复制到 EFI/OC/Kexts/。保留已安装的 Lilu。"
+  echo "   在 Kernel > Add 中紧接 Lilu 添加并启用 NVWebKitFixup："
   echo "   Arch=x86_64; ExecutablePath=Contents/MacOS/NVWebKitFixup; PlistPath=Contents/Info.plist"
-  echo "   MinKernel=24.0.0; MaxKernel=25.99.99. Back up EFI first, validate config.plist, then reboot."
-  printf '   Entry template: %s/Optional/NVWebKitFixup/Kernel-Add.plist\n' "$SOURCE_PACKAGE"
-  printf '   Full guide and recovery steps: %s/Optional/NVWebKitFixup/README.md\n' "$SOURCE_PACKAGE"
+  echo "   MinKernel=24.0.0；MaxKernel=25.99.99。先备份 EFI 并验证 config.plist，然后重启。"
+  printf '   配置项模板：%s/Optional/NVWebKitFixup/Kernel-Add.plist\n' "$SOURCE_PACKAGE"
+  printf '   完整指南和恢复步骤：%s/Optional/NVWebKitFixup/README.md\n' "$SOURCE_PACKAGE"
 }
 choose_webkit_fixup() {
   printf '\n%s\n' '----------------------------------------------------------------------'
-  echo "   Optional Safari WebGL helper for Intel Sequoia/Tahoe (requires Lilu 1.7.2+)."
+  echo "   可选的 Safari WebGL 辅助组件，适用于 Intel Sequoia/Tahoe（需要 Lilu 1.7.2+）。"
   printf '%s\n\n' '----------------------------------------------------------------------'
-  echo "   Manual gives copy/config instructions; automatic detects a compatible OpenCore EFI, then backs up and updates it."
-  echo "   If several qualify, choose your boot EFI from the list. --efi-target overrides detection."
+  echo "   手动模式会显示复制和配置说明；自动模式会查找兼容的 OpenCore EFI，并先备份再更新。"
+  echo "   如果找到多个候选项，请从列表中选择启动 EFI。--efi-target 可指定目标并覆盖自动检测。"
   if [ "$WEBKIT_CHOICE" = ask ]; then
     WEBKIT_CHOICE=manual
     if [ -t 0 ]; then
-      printf '   Safari WebGL helper: [M]anual / [a]utomatic / [s]kip [M]: '
+      printf '   Safari WebGL 辅助组件：[M]手动 / [a]自动 / [s]跳过 [M]：'
       answer=''; IFS= read -r answer || answer=''
       case "$answer" in a|A|auto|automatic) WEBKIT_CHOICE=auto;; s|S|skip) WEBKIT_CHOICE=skip;; esac
     fi
@@ -953,25 +953,24 @@ if [ -d "$HERE/Optional/NVWebKitFixup/NVWebKitFixup.kext" ]; then
     manual) webkit_manual;;
     auto)
       if ! webkit_step_covered; then
-        echo "   NOTE: package checksums do not cover the EFI helper; automatic installation skipped."
+        echo "   NOTE: 软件包校验和未覆盖 EFI 辅助组件，已跳过自动安装。"
         webkit_manual
       else
         webkit_args=(install)
         [ -z "$EFI_TARGET" ] || webkit_args+=(--target "$EFI_TARGET")
         if ! /usr/bin/python3 "$HERE/Optional/NVWebKitFixup/efi.py" "${webkit_args[@]}"; then
-          echo "   NOTE: EFI helper installation did not complete; the NVIDIA driver is installed. Review the EFI backup/error above."
+          echo "   NOTE: EFI 辅助组件未能完成安装；NVIDIA 驱动已安装。请查看上方 EFI 备份和错误信息。"
           webkit_manual
         fi
       fi;;
-    skip) echo "   Safari WebGL helper skipped; existing EFI entries are kept.";;
+    skip) echo "   已跳过 Safari WebGL 辅助组件；保留现有 EFI 项目。";;
   esac
 fi
 
-echo; echo "Done. Reboot now: sudo shutdown -r now"
+echo; echo "安装完成。现在重启：sudo shutdown -r now"
 if [ "$ALLOWED" = "$(echo $KEXTS | wc -w | tr -d ' ')" ]; then
-  echo "This is an update of extensions you already allowed: one restart is enough. macOS may show a notice that they were"
-  echo "updated; the new driver loads on this restart without allowing them again."
+  echo "这是对已批准扩展的更新：重启一次即可。macOS 可能提示扩展已更新；新驱动会在本次重启时加载，无需再次批准。"
 else
-  echo "If macOS asks, allow the extensions in System Settings > Privacy & Security, then reboot once more."
+  echo "如果 macOS 提示，请在“系统设置”>“隐私与安全性”中允许这些扩展，然后再重启一次。"
 fi
-echo "Undo: sudo ./uninstall.sh $BK"
+echo "撤销安装：sudo ./uninstall.sh $BK"
