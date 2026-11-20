@@ -1758,7 +1758,7 @@ bool NVRMNVDAFramebuffer::kapiInit()
             // set WindowServer's enableController would otherwise make, and the console draws on it. A mode set
             // that is refused leaves the console off, as before.
             const NvU64 home = fPhys; const unsigned homePitch = fPitch;
-            if (fKva) { volatile uint32_t *px = (volatile uint32_t *)fKva; for (NvU64 i = 0, n = (NvU64)fPitch * fH / 4; i < n; i++) px[i] = 0; }
+            if (fKva) { volatile uint32_t *px = (volatile uint32_t *)fKva; for (NvU64 w = 0, nw = (NvU64)fPitch * fH / 4; w < nw; w++) px[w] = 0; }
             if (!applyMode()) {
                 FBLOG("verbose start: the early mode set was refused -- the kernel console stays off until WindowServer");
                 return true;
