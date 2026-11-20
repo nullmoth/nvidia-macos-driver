@@ -21,6 +21,7 @@
 
 int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart);
 int nvrm_bar1_block(nv_state_t *nv, NvU32 *pBlock);
+int nvrm_bar1_console_preserved(nv_state_t *nv);
 
 /*
  * Where the verbose console may write VRAM through BAR1 while RM starts.
@@ -42,6 +43,16 @@ int nvrm_bar1_console_state(nv_state_t *nv, NvU64 *pStaticStart)
     if (!pKernelBus->bar1[0].bStaticBar1Enabled) return 1;
     if (pStaticStart) *pStaticStart = pKernelBus->bar1[0].staticBar1.startOffset;
     return 2;
+}
+
+/* 1 once RM has mapped the firmware console at BAR1 offset 0 (kbusInitBar1, bPreserveBar1ConsoleEnabled). */
+int nvrm_bar1_console_preserved(nv_state_t *nv)
+{
+    if (nv == NULL) return 0;
+    OBJGPU *pGpu = NV_GET_NV_PRIV_PGPU(nv);
+    if (pGpu == NULL) return 0;
+    KernelBus *pKernelBus = GPU_GET_KERNEL_BUS(pGpu);
+    return (pKernelBus != NULL && pKernelBus->bBar1ConsolePreserved) ? 1 : 0;
 }
 
 /*

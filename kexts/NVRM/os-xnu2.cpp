@@ -1688,6 +1688,7 @@ extern "C" NvBool nv_xnu_power_is_notebook(void)
     if (!nv_xnu_platpower_enabled()) return NV_FALSE;
     return nvrm_dsm_is_notebook(1, nv_xnu_npcf() != NULL, nv_xnu_battery() != NULL) ? NV_TRUE : NV_FALSE;
 }
+extern "C" bool nvrm_console_fw_base(NvU64 *pBase);   // NVRM.cpp
 void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 *h, NvU32 *depth, NvU32 *pitch, NvU64 *size)
 {
     TRC;
@@ -1700,6 +1701,10 @@ void  NV_API_CALL nv_get_screen_info(nv_state_t *nv, NvU64 *pa, NvU32 *w, NvU32 
     if (pe->getConsoleInfo(&pv) != kIOReturnSuccess) return;
     if (!pv.v_baseAddr || !pv.v_rowBytes || !pv.v_width || !pv.v_height) return;
     NvU64 base = (NvU64)pv.v_baseAddr & ~3ull;
+    // The verbose console draws into a RAM copy that NVRM pushes to the firmware screen at BAR1 offset 0 (NVRM.cpp,
+    // gCons). RM is told the screen's real place, the start of BAR1, so it keeps that VRAM mapped at BAR1 offset 0
+    // when it takes BAR1 over (bPreserveBar1ConsoleEnabled), and the pushes keep reaching the screen.
+    { NvU64 fw = 0; if (nvrm_console_fw_base(&fw) && fw) base = fw; }
     NvU64 sz   = (NvU64)pv.v_rowBytes * (NvU64)pv.v_height;
     if (pa)    *pa    = base;
     if (w)     *w     = (NvU32)pv.v_width;
