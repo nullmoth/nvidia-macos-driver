@@ -1751,24 +1751,19 @@ bool NVRMNVDAFramebuffer::kapiInit()
     if (consoleSilenced && fPhys && fPitch && fW && fH && (NvU64)fPitch * fH <= fSize && getPlatform()) {
         char vb[4] = { 0 };
         if (PE_parse_boot_argn("-v", vb, sizeof vb)) {
-            // Until WindowServer connects, the head still scans out the firmware's own screen, not this surface, so
-            // text drawn here would never be seen. The firmware screen is still in VRAM where the firmware drew it;
-            // only the window the CPU reaches it through moved. BARs are aligned to their size, so its offset in
-            // VRAM is the old console address modulo the firmware's BAR1 size, and it is reached at that offset in the
-            // new BAR1. The surface is used only when that cannot be worked out.
-            NvU64 home = fPhys; unsigned homePitch = fPitch; const char *where = "the boot head's scanout";
-            IOService *nub = pciNub();
-            OSNumber *fwMb = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvrm-bar1-firmware-mb")) : NULL;
-            OSNumber *nowMb = nub ? OSDynamicCast(OSNumber, nub->getProperty("nvrm-bar1-mb")) : NULL;
-            const NvU64 fwSize = fwMb ? (fwMb->unsigned64BitValue() << 20) : 0;
-            const NvU64 nowSize = nowMb ? (nowMb->unsigned64BitValue() << 20) : 0;
-            const unsigned gopPitch = fConsPitch ? fConsPitch : 8192;
-            if (fVtFbBase && fBar1Base && fwSize && !(fwSize & (fwSize - 1)) && nowSize) {
-                const NvU64 off = fVtFbBase & (fwSize - 1);
-                if (off + (NvU64)gopPitch * fH <= nowSize) {
-                    home = fBar1Base + off; homePitch = gopPitch; where = "the firmware screen through the new BAR1";
-                }
+            // Until WindowServer connects the head scans out the firmware's own screen, and that screen cannot be
+            // reached from here: RM put BAR1 in its own layout, so no address the CPU can write is the firmware
+            // screen (writing BAR1 + the old offset corrupted live allocations). So this surface, which is in a
+            // window the CPU writes (the aperture check above proved it), is put on the head now, the first mode
+            // set WindowServer's enableController would otherwise make, and the console draws on it. A mode set
+            // that is refused leaves the console off, as before.
+            const NvU64 home = fPhys; const unsigned homePitch = fPitch;
+            if (fKva) { volatile uint32_t *px = (volatile uint32_t *)fKva; for (NvU64 i = 0, n = (NvU64)fPitch * fH / 4; i < n; i++) px[i] = 0; }
+            if (!applyMode()) {
+                FBLOG("verbose start: the early mode set was refused -- the kernel console stays off until WindowServer");
+                return true;
             }
+            const char *where = "this surface, now on the head";
             PE_Video nv; nvu_zero(&nv, sizeof nv);
             nv.v_baseAddr = (unsigned long)(home | 1);
             nv.v_rowBytes = homePitch; nv.v_width = fW; nv.v_height = fH; nv.v_depth = 32;
