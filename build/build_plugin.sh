@@ -1,15 +1,21 @@
 #!/bin/bash
 set -u
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-N=$HOME/nvmtl-build; S=$N/LIVE/plugin; L=$N/build.lock
-cd $S || exit 2
-[ -z "$(git status --porcelain)" ] || { echo "STOP: LIVE/plugin has uncommitted edits — commit them first:"; git status --short | head; exit 3; }
-C=$(git rev-parse --short HEAD); O=$N/LIVE/out/plugin-$C${RELEASE:+-release}; mkdir -p $O
+# The maintainer's working set when it exists (the default), the clone itself otherwise, so a fresh checkout can run
+# this script without $HOME/nvmtl-build.
+N=${NVMTL_BUILD:-$HOME/nvmtl-build}; HERE=$(cd "$(dirname "$0")/.." && pwd)
+if [ -d "$N/LIVE/plugin" ]; then S="$N/LIVE/plugin"; R="$N/LIVE/out"; L="$N/build.lock"
+else S="$HERE/plugin"; R="$HERE/build/out"; L="$HERE/build/.lock.plugin"; fi
+cd "$S" || exit 2
+[ -z "$(git status --porcelain -- .)" ] || { echo "STOP: LIVE/plugin has uncommitted edits — commit them first:"; git status --short | head; exit 3; }
+C=$(git rev-parse --short HEAD); O=$R/plugin-$C${RELEASE:+-release}; mkdir -p "$O"
+[ -d "$(dirname "$L")" ] || mkdir -p "$(dirname "$L")"
 RDEF=""; [ -n "${RELEASE:-}" ] && RDEF="-DNVMTL_RELEASE=1"
 until mkdir $L 2>/dev/null; do sleep 5; done; echo "build_plugin $C $$" > $L/owner; trap 'rm -rf "$L"' EXIT
 xcrun clang -arch x86_64 -bundle -fobjc-arc -O1 $RDEF -Wno-protocol -Wno-incomplete-implementation \
   -I"$HOME/Vulkan-Headers/include" -o $O/NVMTLDriver NVMTLDevice.m nvmtl_dlss.c dlss/elfhost.c dlss/lnxlibc.c \
-  -framework Foundation -framework Metal -framework IOSurface -framework MetalFX -liconv 2>$O/NVMTLDriver.err \
+  -framework Foundation -framework Metal -framework IOSurface -framework MetalFX -framework IOKit -liconv \
+  2>"$O/NVMTLDriver.err" \
   || { echo "STOP: compile failed"; grep -A2 ': error:' $O/NVMTLDriver.err | head -30; exit 5; }
 codesign -f -s - $O/NVMTLDriver 2>/dev/null
 miss=0
