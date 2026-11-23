@@ -325,7 +325,7 @@ static int nvrmfbBacklightRestoreSysctl SYSCTL_HANDLER_ARGS
     return err;
 }
 SYSCTL_PROC(_debug, OID_AUTO, nvrmfb_backlight_restore, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, NULL, 0,
-            nvrmfbBacklightRestoreSysctl, "I", "restore a saved panel brightness (0..65535) before the user has moved it this boot");
+            nvrmfbBacklightRestoreSysctl, "I", "restore a saved panel brightness (version and 16-bit level)");
 const OSSymbol *NVRMBacklightHandler::sBrightnessProbe = nullptr;
 const OSSymbol *NVRMBacklightHandler::sLinearBrightnessProbe = nullptr;
 
@@ -451,7 +451,12 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
     }
     else {
         SInt32 target = OSAddAtomic(0, &fUserLevel);
-        if (value == kAppleBacklightDefaultMax || level > target) level = target;
+        if (value == kAppleBacklightDefaultMax) level = target;
+        else {
+            // Preserve the previous hardware output of temporary dimming requests.
+            level = (SInt32)nvrm_backlight_from_percent(nvrm_backlight_v2_percent((UInt32)level));
+            if (level > target) level = target;
+        }
     }
     BLLOG("backlight: %s request logical=%d/65535 user-target=%d/65535",
         userRequest ? "user" : "power", (int)level, (int)OSAddAtomic(0, &fUserLevel));
@@ -461,9 +466,11 @@ bool NVRMBacklightHandler::doIntegerSet(OSDictionary *params, const OSSymbol *pa
 }
 
 // debug.nvrmfb_backlight_restore: the same restore setDisplay makes from /options, for a level kept outside NVRAM.
-int NVRMBacklightHandler::restoreExternal(SInt32 level)
+int NVRMBacklightHandler::restoreExternal(SInt32 record)
 {
-    if (level < 0 || level > (SInt32)kNVRMBacklightMax) return EINVAL;
+    UInt32 decoded;
+    if (!nvrm_backlight_decode_restore(record, &decoded)) return EINVAL;
+    SInt32 level = (SInt32)decoded;
     // This runs on the caller's thread while the display's own thread may be in setDisplay or doIntegerSet: the check,
     // the flags and a retained snapshot of the parameter dictionary are taken under one lock.
     OSDictionary *shown = nullptr;
