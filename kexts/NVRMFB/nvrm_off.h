@@ -116,6 +116,26 @@ static inline unsigned nvrm_guard_starts(IORegistryEntry *options)
     return n;
 }
 
+// The guard's answer is decided once per boot, by the first driver that asks (NVRM, before it counts its own start),
+// and kept in the registry root, which every NullMoth kext sees and which does not survive a restart. 3.0 let NVAccel
+// and NVRMFB read the NVRAM count again after NVRM had raised it: on "start 2" NVRM brought the card up and the other
+// two read 2 and refused without a word, so the boot had no accelerator and no framebuffer and counted as a failed
+// start (#633).
+#define NVRM_GUARD_BOOT_KEY "nullmoth-guard-off-this-boot"
+static inline bool nvrm_guard_latched(bool now)
+{
+    IORegistryEntry *root = IORegistryEntry::getRegistryRoot();
+    if (!root)
+        return now;
+    if (OSObject *o = root->copyProperty(NVRM_GUARD_BOOT_KEY)) {
+        const bool off = (o == kOSBooleanTrue);
+        o->release();
+        return off;
+    }
+    root->setProperty(NVRM_GUARD_BOOT_KEY, now ? kOSBooleanTrue : kOSBooleanFalse);
+    return now;
+}
+
 static inline bool nvrm_driver_off(void)
 {
     char arg[8];
@@ -125,7 +145,7 @@ static inline bool nvrm_driver_off(void)
     if (!options)
         return false;  // NVRAM not published yet: the boot-arg alone decides, as before
     OSObject *flag = options->copyProperty("nullmoth-remove");
-    const bool guard = nvrm_guard_starts(options) >= NVRM_GUARD_LIMIT;
+    const bool guard = nvrm_guard_latched(nvrm_guard_starts(options) >= NVRM_GUARD_LIMIT);
     options->release();
     if (flag) { flag->release(); return true; }
     return guard;
