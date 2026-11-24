@@ -32,19 +32,64 @@ static inline void nvrm_guard_sync(IORegistryEntry *options)
 #define NVRM_BACKLIGHT_VAR "nullmoth-backlight"
 
 // IODisplay logical precision is independent of NVKMS's integer-percent output.
-enum { kNVRMBacklightMax = 0xFFFF, kNVRMMinBacklight = 5 };
+enum { kNVRMBacklightMax = 0xFFFF, kNVRMLegacyMinBacklight = 5 };
+
+// Inverse logarithmic curve: (8^x - 1) / 7, interpolated in hundredths of a percent.
+static inline UInt32 nvrm_backlight_curve(UInt32 level)
+{
+    static constexpr UInt32 points[] = {
+        0, 198, 424, 681, 974, 1307, 1687, 2120, 2612,
+        3173, 3811, 4539, 5367, 6310, 7384, 8607, 10000
+    };
+    UInt32 position = level * 16;
+    UInt32 i = position / kNVRMBacklightMax;
+    if (i == 16) return points[16];
+    UInt32 fraction = position % kNVRMBacklightMax;
+    return points[i] + ((points[i + 1] - points[i]) * fraction + kNVRMBacklightMax / 2)
+        / kNVRMBacklightMax;
+}
 
 static inline UInt32 nvrm_backlight_from_percent(UInt32 percent)
 {
-    if (percent <= kNVRMMinBacklight) return 0;
-    return ((percent - kNVRMMinBacklight) * kNVRMBacklightMax + (100 - kNVRMMinBacklight) / 2)
-        / (100 - kNVRMMinBacklight);
+    if (percent == 100) return kNVRMBacklightMax;
+    UInt32 lo = 0, hi = kNVRMBacklightMax;
+    while (lo < hi) {
+        UInt32 mid = lo + (hi - lo) / 2;
+        if (nvrm_backlight_curve(mid) < percent * 100) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
 }
 
 static inline UInt32 nvrm_backlight_to_percent(UInt32 level)
 {
-    return kNVRMMinBacklight + (level * (100 - kNVRMMinBacklight) + kNVRMBacklightMax / 2)
-        / kNVRMBacklightMax;
+    return (nvrm_backlight_curve(level) + 50) / 100;
+}
+
+// Version 2 stored targets over the 5..100% span.
+static inline UInt32 nvrm_backlight_v2_percent(UInt32 level)
+{
+    return kNVRMLegacyMinBacklight +
+        (level * (100 - kNVRMLegacyMinBacklight) + kNVRMBacklightMax / 2) / kNVRMBacklightMax;
+}
+
+static inline bool nvrm_backlight_decode(UInt32 version, UInt32 value, UInt32 *level)
+{
+    if (version == 4) { *level = value; return true; }
+    if (version < 1 || version > 3) return false;
+    UInt32 percent = version == 2 ? nvrm_backlight_v2_percent(value)
+        : (value * 100 + kNVRMBacklightMax / 2) / kNVRMBacklightMax;
+    if (version == 1 && percent < kNVRMLegacyMinBacklight) percent = kNVRMLegacyMinBacklight;
+    *level = nvrm_backlight_from_percent(percent);
+    return true;
+}
+
+// The old keeper sends a bare v2 level; the new keeper includes the record version.
+static inline bool nvrm_backlight_decode_restore(SInt32 record, UInt32 *level)
+{
+    if (record < 0) return false;
+    UInt32 version = (UInt32)record >> 16;
+    return nvrm_backlight_decode(version ? version : 2, (UInt32)record & kNVRMBacklightMax, level);
 }
 
 static inline bool nvrm_backlight_read(IORegistryEntry *options, UInt32 *level)
@@ -57,14 +102,10 @@ static inline bool nvrm_backlight_read(IORegistryEntry *options, UInt32 *level)
     if (d) {
         const unsigned char *bytes = (const unsigned char *)d->getBytesNoCopy();
         if (d->getLength() == 1 && bytes[0] <= 100) {
-            value = nvrm_backlight_from_percent(bytes[0]);
+            value = nvrm_backlight_from_percent(bytes[0] < kNVRMLegacyMinBacklight ? kNVRMLegacyMinBacklight : bytes[0]);
             valid = true;
-        } else if (d->getLength() == 3 && (bytes[0] == 1 || bytes[0] == 2)) {
-            value = (UInt32)bytes[1] | ((UInt32)bytes[2] << 8);
-            // Version 1 used the full 0..100 span; retain its rounded hardware output.
-            if (bytes[0] == 1)
-                value = nvrm_backlight_from_percent((value * 100 + kNVRMBacklightMax / 2) / kNVRMBacklightMax);
-            valid = true;
+        } else if (d->getLength() == 3) {
+            valid = nvrm_backlight_decode(bytes[0], (UInt32)bytes[1] | ((UInt32)bytes[2] << 8), &value);
         }
     }
     if (o) o->release();
@@ -98,8 +139,8 @@ static inline bool nvrm_backlight_write(IORegistryEntry *options, UInt32 level)
     if (!options || level > kNVRMBacklightMax) return false;
     UInt32 current;
     if (nvrm_backlight_read(options, &current) && current == level) return true;
-    // Version 2 uses the 5..100 hardware span; older records are converted when read.
-    unsigned char bytes[] = {2, (unsigned char)level, (unsigned char)(level >> 8)};
+    // Version 4 stores the logical target on the perceptual curve.
+    unsigned char bytes[] = {4, (unsigned char)level, (unsigned char)(level >> 8)};
     OSData *d = OSData::withBytes(bytes, sizeof bytes);
     if (!d) return false;
     bool ok = options->setProperty(NVRM_BACKLIGHT_VAR, d);

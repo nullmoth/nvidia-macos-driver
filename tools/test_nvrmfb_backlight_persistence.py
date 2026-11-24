@@ -218,13 +218,13 @@ int main() {
     constexpr UInt32 target = 20777;
     assert(restored->doIntegerSet(&user, gIODisplayLinearBrightnessKey, target));
     NVRMBacklightHandler::applyFire(restored, nullptr);
-    assert(rm.lastPercent == 35 && savedValue() == nvrm_backlight_from_percent(37) && gWrites == 0);
+    assert(rm.lastPercent == 13 && savedValue() == nvrm_backlight_from_percent(37) && gWrites == 0);
     NVRMBacklightHandler::persistFire(restored, nullptr);
     assert(gWrites == 0);
     fireSave(restored);
-    assert(rm.lastPercent == 35 && savedValue() == target && gWrites == 1);
+    assert(rm.lastPercent == 13 && savedValue() == target && gWrites == 1);
     const auto &bytes = IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR];
-    assert(bytes == std::vector<unsigned char>({2, 0x29, 0x51}));
+    assert(bytes == std::vector<unsigned char>({4, 0x29, 0x51}));
     assert(display.parameters->values[gIODisplayBrightnessKey] == target);
     assert(restored->fLevel == (SInt32)target && restored->fUserLevel == (SInt32)target);
     auto restarted = NVRMBacklightHandler::withRM(&rm, 100);
@@ -232,9 +232,9 @@ int main() {
     assert(restarted->setDisplay(&restartDisplay));
     assert(restartDisplay.parameters->values[gIODisplayLinearBrightnessKey] == target);
     NVRMBacklightHandler::applyFire(restarted, nullptr);
-    assert(rm.lastPercent == 35 && savedValue() == target && gWrites == 1);
+    assert(rm.lastPercent == 13 && savedValue() == target && gWrites == 1);
 
-    assert(restored->doIntegerSet(&power, gIODisplayBrightnessKey, nvrm_backlight_from_percent(12)));
+    assert(restored->doIntegerSet(&power, gIODisplayBrightnessKey, 5000));
     NVRMBacklightHandler::applyFire(restored, nullptr);
     assert(rm.lastPercent == 12 && savedValue() == target && gWrites == 1);
     assert(display.parameters->values[gIODisplayBrightnessKey] == target);
@@ -273,8 +273,8 @@ int main() {
         assert(savedValue() == level && restored->fLevel == (SInt32)level);
         auto next = NVRMBacklightHandler::withRM(&rm, 80);
         assert(next->fUserLevel == (SInt32)level && next->fRestoreLevel == (SInt32)level);
-        if (level <= 1) assert(rm.lastPercent == 5);
-        if (level == 32768) assert(rm.lastPercent == 53);
+        if (level <= 1) assert(rm.lastPercent == 0);
+        if (level == 32768) assert(rm.lastPercent == 26);
         if (level >= 65534) assert(rm.lastPercent == 100);
     }
     unsigned writes = gWrites;
@@ -282,7 +282,7 @@ int main() {
     assert(!nvrm_backlight_write(IORegistryEntry::options, 65536) && gWrites == writes);
     for (unsigned percent = 0; percent <= 100; ++percent) {
         setSaved((unsigned char)percent);
-        assert(savedValue() == nvrm_backlight_from_percent(percent));
+        assert(savedValue() == nvrm_backlight_from_percent(percent < 5 ? 5 : percent));
         assert(nvrm_backlight_to_percent(savedValue()) == (percent < 5 ? 5 : percent));
     }
     for (UInt32 legacy : {0U, 1U, 3277U, 20777U, 32768U, 65535U}) {
@@ -290,10 +290,10 @@ int main() {
         UInt32 percent = (legacy * 100 + 32767) / 65535;
         assert(nvrm_backlight_to_percent(savedValue()) == (percent < 5 ? 5 : percent));
     }
-    assert(nvrm_backlight_to_percent(0) == 5);
-    assert(nvrm_backlight_to_percent(3277) == 10);
+    assert(nvrm_backlight_to_percent(0) == 0);
+    assert(nvrm_backlight_to_percent(4096) == 2);
     assert(nvrm_backlight_to_percent(65535) == 100);
-    for (const auto &malformed : std::vector<std::vector<unsigned char>>{{}, {101}, {45, 0}, {3, 1, 0}, {1, 1, 0, 0}}) {
+    for (const auto &malformed : std::vector<std::vector<unsigned char>>{{}, {101}, {45, 0}, {5, 1, 0}, {1, 1, 0, 0}}) {
         IORegistryEntry::options->values[NVRM_BACKLIGHT_VAR] = malformed;
         auto invalid = NVRMBacklightHandler::withRM(&rm, 63);
         assert(invalid->fUserLevel == (SInt32)nvrm_backlight_from_percent(63) && invalid->fRestoreLevel == -1);
@@ -310,9 +310,9 @@ int main() {
         assert(boot->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));
         NVRMBacklightHandler::applyFire(boot, nullptr);
     }
-    assert(savedValue() == 0x43E5 && boot->fPersist->enters == 0);          // nothing queued to be saved
-    assert(rm.lastPercent == nvrm_backlight_to_percent(0x43E5));           // the panel stays at the saved level
-    assert(boot->fUserLevel == 0x43E5);
+    assert(savedValue() == nvrm_backlight_from_percent(30) && boot->fPersist->enters == 0);          // nothing queued to be saved
+    assert(rm.lastPercent == 30);           // the panel stays at the saved level
+    assert(boot->fUserLevel == (SInt32)nvrm_backlight_from_percent(30));
     // a real choice afterwards is honoured, including the maximum
     assert(boot->doIntegerSet(&user, gIODisplayBrightnessKey, 30000));
     NVRMBacklightHandler::applyFire(boot, nullptr); fireSave(boot);
@@ -338,14 +338,23 @@ int main() {
     assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));   // the display stack's start-up maximum
     NVRMBacklightHandler::applyFire(lost, nullptr);
     { int before = gBacklightLock->taken; assert(lost->restoreExternal(16384) == 0); assert(gBacklightLock->taken > before && gBacklightLock->held == 0); }
-    assert(lost->fUserLevel == 16384 && lost->fPending == 16384 && savedValue() == 16384);
-    assert(lostDisplay.parameters->values[gIODisplayBrightnessKey] == 16384);
+    assert(lost->fUserLevel == (SInt32)nvrm_backlight_from_percent(29) && savedValue() == nvrm_backlight_from_percent(29));
+    assert(lostDisplay.parameters->values[gIODisplayBrightnessKey] == nvrm_backlight_from_percent(29));
     NVRMBacklightHandler::applyFire(lost, nullptr);
-    assert(rm.lastPercent == nvrm_backlight_to_percent(16384));
+    assert(rm.lastPercent == 29);
     assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 65535));   // a repeated start-up maximum is not a choice
     NVRMBacklightHandler::applyFire(lost, nullptr);
-    assert(rm.lastPercent == nvrm_backlight_to_percent(16384));
-    assert(lost->restoreExternal(70000) == EINVAL && lost->restoreExternal(-1) == EINVAL);
+    assert(rm.lastPercent == 29);
+    assert(lost->restoreExternal((2 << 16) | 16384) == 0);
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(rm.lastPercent == 29);
+    assert(lost->restoreExternal((3 << 16) | 32768) == 0);
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(rm.lastPercent == 50);
+    assert(lost->restoreExternal((4 << 16) | 32768) == 0);
+    NVRMBacklightHandler::applyFire(lost, nullptr);
+    assert(rm.lastPercent == 26 && savedValue() == 32768);
+    assert(lost->restoreExternal(5 << 16) == EINVAL && lost->restoreExternal(-1) == EINVAL);
     // once the user moves the slider, an external restore is refused and the user's level stays
     assert(lost->doIntegerSet(&user, gIODisplayBrightnessKey, 20000));
     NVRMBacklightHandler::applyFire(lost, nullptr);

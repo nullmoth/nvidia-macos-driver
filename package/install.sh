@@ -670,10 +670,10 @@ cat > "$BL.tmp" <<'EOF' || die "write the backlight job"
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 V=7C436110-AB2A-4BBB-A880-FE41995C9F82; F=/Library/NullMoth/backlight.level; LOG=/Library/NullMoth/backlight.log
 OID=debug.nvrmfb_backlight_restore
-# The variable as six hex digits: version 2 and the little-endian 16-bit level. Empty when absent or another version.
+# The variable as six hex digits: version and little-endian 16-bit level.
 cur() {
   v=$(nvram -x -p 2>/dev/null | plutil -extract "$V:nullmoth-backlight" raw -o - - 2>/dev/null | base64 -D 2>/dev/null | od -An -tx1 | tr -d ' \n')
-  case $v in 02[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) echo "$v";; esac
+  case $v in 0[1-4][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) echo "$v";; esac
 }
 note() {
   echo "$(date) $*" >> "$LOG"
@@ -681,7 +681,7 @@ note() {
   [ "$(wc -l < "$LOG")" -le 200 ] || { tail -n 200 "$LOG" > "$LOG.tmp" && mv -f "$LOG.tmp" "$LOG"; }
 }
 saved=$(cat "$F" 2>/dev/null)
-case $saved in 02[0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) saved=;; esac
+case $saved in 0[1-4][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) saved=;; esac
 # The entry point exists once the internal panel's brightness control is up; no panel within two minutes: nothing to do.
 n=0
 until sysctl -n $OID >/dev/null 2>&1; do
@@ -691,7 +691,10 @@ done
 now=$(cur)
 if [ -n "$saved" ] && [ "$now" != "$saved" ]; then
   lvl=$(( 0x${saved:2:2} + 0x${saved:4:2} * 256 ))
-  if sysctl -w $OID=$lvl >/dev/null 2>&1; then
+  # Keep v2 compatible with the old kernel. Other records need their version to select the right curve.
+  record=$lvl
+  [ "${saved:0:2}" = 02 ] || record=$(( 0x${saved:0:2} * 65536 + lvl ))
+  if sysctl -w $OID=$record >/dev/null 2>&1; then
     note "NVRAM held ${now:-nothing}, the saved copy $saved: level $lvl restored"
   else
     note "NVRAM held ${now:-nothing}, the saved copy $saved: the driver refused the restore (brightness already moved)"

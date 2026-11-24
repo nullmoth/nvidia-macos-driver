@@ -55,7 +55,9 @@ def run_job(script, nvram_hex, saved_hex, sysctl_rc=0, panel=True):
             "#!/bin/bash\n"
             f'if [ "$1" = -n ]; then {"echo -1" if panel else "exit 1"}; exit 0; fi\n'
             f'if [ "$1" = -w ]; then echo "$2" >> "{d}/restores"; exit {sysctl_rc}; fi\nexit 1\n')
-        for f in ("nvram", "sysctl"):
+        ready = d / "ready"
+        (stub / "sleep").write_text(f'#!/bin/bash\nif [ "$1" = 30 ]; then touch "{ready}"; exec /bin/sleep 1; fi\nexec /bin/sleep "$@"\n')
+        for f in ("nvram", "sysctl", "sleep"):
             os.chmod(stub / f, 0o755)
         level, log = d / "backlight.level", d / "backlight.log"
         if saved_hex:
@@ -66,7 +68,12 @@ def run_job(script, nvram_hex, saved_hex, sysctl_rc=0, panel=True):
             s = s.replace("sleep 2\n", "sleep 0\n")
         js = d / "job.sh"; js.write_text(s)
         p = subprocess.Popen(["/bin/bash", str(js)])
-        time.sleep(1.5)
+        deadline = time.monotonic() + 10
+        while p.poll() is None and not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if p.poll() is None and not ready.exists():
+            p.kill(); p.wait()
+            return None, None, "job did not reach the copy loop"
         if p.poll() is None:
             p.send_signal(signal.SIGTERM)
         try:
@@ -85,6 +92,13 @@ OID = "debug.nvrmfb_backlight_restore"
 r, saved, log = run_job(script, "02ffff", "020040")
 arm("NVRAM came back with an old level: the saved copy is restored (logical 16384)", r == [f"{OID}=16384"], f"{r}")
 arm("and the restore is logged with both values", "NVRAM held 02ffff, the saved copy 020040: level 16384 restored" in (log or ""), log)
+
+r, saved, _ = run_job(script, "02ffff", "040080")
+arm("a curved record carries its version to the kernel", r == [f"{OID}=294912"], f"{r}")
+r, saved, _ = run_job(script, "040080", "040080")
+arm("matching curved records need no restore", r == [], f"{r}")
+r, saved, _ = run_job(script, "040080", None)
+arm("the curved record is copied to disk intact", saved == "040080", f"{saved}")
 
 # 2. A machine whose NVRAM works: the variable and the copy agree, the job must not touch the driver.
 r, saved, _ = run_job(script, "028f40", "028f40")
