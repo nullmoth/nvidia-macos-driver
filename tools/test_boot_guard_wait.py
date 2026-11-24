@@ -30,7 +30,8 @@ typedef int SInt32;
 // ---- a fake NVRAM: the calls the guard makes, over a map that survives "reboots"; two knobs model a registry that
 // is not published yet (fromPath returns NULL) and a write that fails ----
 static bool gOptionsGone, gWritesFail;
-struct OSObject { virtual ~OSObject() {} void release() { delete this; } };
+struct OSBoolean;
+struct OSObject { virtual ~OSObject() {} virtual bool isStatic() const { return false; } void release() { if (!isStatic()) delete this; } };
 struct OSData : OSObject {
     std::vector<unsigned char> b;
     static OSData *withBytes(const void *p, unsigned n) { OSData *d = new OSData; d->b.assign((const unsigned char *)p, (const unsigned char *)p + n); return d; }
@@ -40,17 +41,24 @@ struct OSData : OSObject {
 template <class T> T *OSDynamicCast_impl(OSObject *o) { return dynamic_cast<T *>(o); }
 #define OSDynamicCast(T, o) OSDynamicCast_impl<T>(o)
 static std::map<std::string, std::vector<unsigned char>> gNvram, gSynced;   // gSynced: what reached the firmware
-struct OSBoolean : OSObject {};
-static OSBoolean gTrueObj;
+struct OSBoolean : OSObject { bool isStatic() const override { return true; } };
+static OSBoolean gTrueObj, gFalseObj;
 #define kOSBooleanTrue (&gTrueObj)
+#define kOSBooleanFalse (&gFalseObj)
+static std::map<std::string, OSObject *> gRoot;   // the registry root: per boot (this process), never in NVRAM
+struct RootRef : OSObject { OSObject *o; void release() {} };
 #define kIONVRAMSyncNowPropertyKey "IONVRAM-SYNCNOW-PROPERTY"
 struct IORegistryEntry : OSObject {
+    bool root = false;
     static IORegistryEntry *fromPath(const char *, int) { return gOptionsGone ? nullptr : new IORegistryEntry; }
-    OSObject *copyProperty(const char *k) { auto it = gNvram.find(k); return it == gNvram.end() ? nullptr : OSData::withBytes(it->second.data(), (unsigned)it->second.size()); }
+    static IORegistryEntry *getRegistryRoot() { static IORegistryEntry r; r.root = true; return &r; }
+    OSObject *copyProperty(const char *k) {
+        if (root) { auto it = gRoot.find(k); return it == gRoot.end() ? nullptr : it->second; }
+        auto it = gNvram.find(k); return it == gNvram.end() ? nullptr : OSData::withBytes(it->second.data(), (unsigned)it->second.size()); }
     bool setProperty(const char *k, OSData *d) { if (gWritesFail) return false; gNvram[k] = d->b; return true; }
     void removeProperty(const char *k) { if (!gWritesFail) gNvram.erase(k); }
     // the sync key copies the kernel's NVRAM to the firmware; nothing else does until a clean shutdown
-    bool setProperty(const char *k, OSObject *) { if (!strcmp(k, kIONVRAMSyncNowPropertyKey)) gSynced = gNvram; return true; }
+    bool setProperty(const char *k, OSObject *o) { if (root) { gRoot[k] = o; return true; } if (!strcmp(k, kIONVRAMSyncNowPropertyKey)) gSynced = gNvram; return true; }
 };
 static int gIODTPlane = 0;
 typedef void *thread_t;
@@ -72,6 +80,7 @@ int main(int argc, char **argv) {
         gOptionsGone = sc.find("nooptions-at-start") != std::string::npos;      // registry not published when NVRM started
         nvrm_guard_count_start();
         gOptionsGone = false;
+        if (nvrm_driver_off() != off) { printf("off=9 starts=%u ok=0\nSPLIT\n", starts()); return 0; }   // NVAccel, NVRMFB
         const bool wait = sc.find("wait") != std::string::npos;
         if (wait) {
             gWritesFail = sc.find("pausefail") != std::string::npos;             // the pause could not be written
@@ -130,6 +139,11 @@ def check(name, ok, detail=''):
 
 
 exe = build(body)
+r = boots(exe, ['hang', 'wait-dark'])
+check('on start 2 the accelerator and framebuffer get the same answer NVRM got before it counted (#633)',
+      r[1][0] == 0 and r[1][1] == 2, r)
+o = subprocess.run([str(exe), 'wait-dark', 'nullmoth-nv-starts=\x01'], capture_output=True, text=True).stdout
+check('negative control: no kext sees a different answer than NVRM in the same boot', 'SPLIT' not in o, o)
 r = boots(exe, ['good', 'good'])
 check('a start that lights its display leaves no count', [x[:2] for x in r] == [(0, 0), (0, 0)], r)
 r = boots(exe, ['hang', 'hang', 'good'])
