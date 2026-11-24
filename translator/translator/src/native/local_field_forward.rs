@@ -280,10 +280,6 @@ fn forward_in_function(header: &str, body: &mut Vec<String>) -> usize {
         if escaped.contains(obj) || field_uses_ok.get(obj) == Some(&false) {
             continue;
         }
-        let b = block_of[ss[0].line];
-        if ss.iter().any(|s| block_of[s.line] != b) {
-            continue;
-        }
         let last = ss.iter().max_by_key(|s| s.line).unwrap();
         if !last.ty.starts_with("ptr addrspace(") {
             continue;
@@ -293,9 +289,19 @@ fn forward_in_function(header: &str, body: &mut Vec<String>) -> usize {
             continue;
         }
         let Some(ls) = loads.get(key) else { continue };
+        // Every store writing the same parameter or global: a load reads that value or memory nothing wrote yet,
+        // and an unwritten value may be taken to be anything, so the parameter is a valid answer on every path
+        // (VFX's particle_surface_frag stores its constant buffer into a local in two branches).
+        let same_everywhere = ss.iter().all(|s| s.value == last.value && s.ty == last.ty);
+        let b = block_of[ss[0].line];
+        let one_block = ss.iter().all(|s| block_of[s.line] == b);
+        if !same_everywhere && !one_block {
+            continue;
+        }
         let ok = ls.iter().all(|(line, _, ty)| {
             ty == &last.ty
-                && if block_of[*line] == b { *line > last.line } else { dom[block_of[*line]][b] }
+                && (same_everywhere
+                    || if block_of[*line] == b { *line > last.line } else { dom[block_of[*line]][b] })
         });
         if !ok {
             continue;
@@ -305,12 +311,73 @@ fn forward_in_function(header: &str, body: &mut Vec<String>) -> usize {
             drop_lines.insert(*line);
         }
     }
-    if renames.is_empty() {
+    // A device-pointer field that no load reads any more (all of them forwarded, or none to begin with) is dead: its
+    // stores are the only thing left that would put a descriptor pointer into function memory, which Logical SPIR-V
+    // cannot hold ("pointer %N has no exact BDA address representation" on VFX's particle_surface_frag).
+    let mut dead_stores = 0usize;
+    for (key, ss) in &stores {
+        let (obj, _) = key;
+        if escaped.contains(obj) || field_uses_ok.get(obj) == Some(&false) {
+            continue;
+        }
+        if !ss.iter().all(|s| s.ty.starts_with("ptr addrspace(")) {
+            continue;
+        }
+        let unread = loads.get(key).is_none_or(|ls| ls.iter().all(|(line, _, _)| drop_lines.contains(line)));
+        if unread {
+            for st in ss {
+                drop_lines.insert(st.line);
+                dead_stores += 1;
+            }
+        }
+    }
+    if renames.is_empty() && dead_stores == 0 {
         return 0;
     }
     let mut out = Vec::with_capacity(body.len());
     for (i, line) in body.iter().enumerate() {
         if drop_lines.contains(&i) {
+            continue;
+        }
+        let mut l = line.clone();
+        for (from, to) in &renames {
+            if !token_positions(&l, from).is_empty() {
+                l = replace_token(&l, from, to);
+            }
+        }
+        out.push(l);
+    }
+    *body = out;
+    renames.len() + dead_stores
+}
+
+/// A pointer phi whose every incoming value is the same value is that value. After forwarding, VFX's
+/// particle_surface_frag has `phi ptr addrspace(2) [ %31, %a ], [ %31, %b ]`, and a descriptor pointer cannot be a phi
+/// in Logical SPIR-V ("pointer %31 has no exact BDA address representation").
+fn fold_uniform_pointer_phis(body: &mut Vec<String>) -> usize {
+    let mut renames: Vec<(String, String)> = Vec::new();
+    let mut drop: HashSet<usize> = HashSet::new();
+    for (i, line) in body.iter().enumerate() {
+        let Some((lhs, rhs)) = assigned(line) else { continue };
+        let Some(rest) = rhs.strip_prefix("phi ptr addrspace(") else { continue };
+        let Some((_, incoming)) = rest.split_once(") ") else { continue };
+        let values: Vec<&str> = incoming
+            .split(']')
+            .filter_map(|part| part.trim().trim_start_matches(',').trim().strip_prefix('['))
+            .filter_map(|pair| pair.split(',').next().map(str::trim))
+            .collect();
+        if values.is_empty() || values.iter().any(|v| *v != values[0]) || values[0] == lhs {
+            continue;
+        }
+        renames.push((lhs.to_string(), values[0].to_string()));
+        drop.insert(i);
+    }
+    if renames.is_empty() {
+        return 0;
+    }
+    let mut out = Vec::with_capacity(body.len());
+    for (i, line) in body.iter().enumerate() {
+        if drop.contains(&i) {
             continue;
         }
         let mut l = line.clone();
@@ -340,7 +407,15 @@ pub(crate) fn forward_local_pointer_fields(san_ll: &str) -> Option<String> {
                 j += 1;
             }
             let mut body: Vec<String> = lines[start..j.min(lines.len())].iter().map(|s| s.to_string()).collect();
-            total += forward_in_function(line, &mut body);
+            // a forwarded value can itself be what another field stores (VFX: a local copies the constant-buffer
+            // pointer it loaded from another local), so the pass runs until nothing changes
+            for _ in 0..8 {
+                let n = forward_in_function(line, &mut body) + fold_uniform_pointer_phis(&mut body);
+                total += n;
+                if n == 0 {
+                    break;
+                }
+            }
             out.push(line.to_string());
             out.extend(body);
             if j < lines.len() {
@@ -392,6 +467,54 @@ next:
         let out = forward_local_pointer_fields(SHAPE).expect("forwarded");
         assert!(out.contains("@air.intersect(ptr addrspace(1) %as, ptr addrspace(1) %tab)"), "{out}");
         assert!(!out.contains("load ptr addrspace(1), ptr %g1"), "{out}");
+    }
+
+    #[test]
+    fn a_pointer_field_no_one_reads_loses_its_stores() {
+        let out = forward_local_pointer_fields(SHAPE).expect("forwarded");
+        assert!(!out.contains("store ptr addrspace(1) %as"), "{out}");
+        assert!(!out.contains("store ptr addrspace(1) %tab"), "{out}");
+    }
+
+    #[test]
+    fn negative_control_a_field_still_read_keeps_its_store() {
+        // field 1 holds two different values in two blocks and is read before the second store: it stays read, so
+        // its stores stay too
+        let s = SHAPE
+            .replace("next:\n", "next:\n  store ptr addrspace(1) %tab, ptr %f1, align 8\n")
+            .replace("  br label %next", "  %early = load ptr addrspace(1), ptr %f1, align 8\n  br label %next");
+        let out = forward_local_pointer_fields(&s).unwrap_or_else(|| s.clone());
+        assert!(out.contains("store ptr addrspace(1) %as"), "{out}");
+    }
+
+    #[test]
+    fn the_same_parameter_stored_in_two_branches_is_forwarded() {
+        let s = SHAPE
+            .replace("  store ptr addrspace(1) %as, ptr %f1, align 8\n", "")
+            .replace("  br label %next", "  br i1 true, label %a, label %b\n\na:\n  store ptr addrspace(1) %as, ptr %f1, align 8\n  br label %next\n\nb:\n  store ptr addrspace(1) %as, ptr %f1, align 8\n  br label %next");
+        let out = forward_local_pointer_fields(&s).expect("forwarded");
+        assert!(out.contains("@air.intersect(ptr addrspace(1) %as"), "{out}");
+    }
+
+    #[test]
+    fn negative_control_different_values_in_two_branches_are_not_forwarded() {
+        let s = SHAPE
+            .replace("  store ptr addrspace(1) %as, ptr %f1, align 8\n", "")
+            .replace("  br label %next", "  br i1 true, label %a, label %b\n\na:\n  store ptr addrspace(1) %as, ptr %f1, align 8\n  br label %next\n\nb:\n  store ptr addrspace(1) %tab, ptr %f1, align 8\n  br label %next");
+        let out = forward_local_pointer_fields(&s).unwrap_or_else(|| s.clone());
+        assert!(out.contains("load ptr addrspace(1), ptr %g1"), "{out}");
+    }
+
+    #[test]
+    fn a_pointer_phi_of_one_value_is_that_value() {
+        let mut body = vec![
+            "  %p = phi ptr addrspace(2) [ %c, %a ], [ %c, %b ]".to_string(),
+            "  %g = getelementptr inbounds i8, ptr addrspace(2) %p, i64 4".to_string(),
+            "  %q = phi ptr addrspace(2) [ %c, %a ], [ %d, %b ]".to_string(),
+        ];
+        assert_eq!(super::fold_uniform_pointer_phis(&mut body), 1);
+        assert_eq!(body[0], "  %g = getelementptr inbounds i8, ptr addrspace(2) %c, i64 4");
+        assert!(body[1].contains("[ %d, %b ]"), "a phi of two values stays");
     }
 
     #[test]
