@@ -874,7 +874,36 @@ pub fn translate_native_no_retry_with_options(
     .map(|finished| finished.bytes)
 }
 
+/// An acceleration structure the entry stores into a local object (VFX's `Raytracer { constants, accel, table }`) and
+/// a helper loads back cannot cross the call, so the ray-query lowering, which runs after emission, finds it "defined
+/// nowhere" and refuses the pipeline. Inlining the helpers puts the load next to the store; the translation then runs
+/// once more on the inlined module. Measured on VFX (macOS 26.7.1): vfx_ray_tracer and eight other RT kernels were
+/// refused this way, and loginwindow and SecurityAgent divided by the thread count of the nil pipeline in a loop
+/// (#624, #569). Only that refusal retries, and only when the inliner changed the module.
+fn ray_query_inline_retry<T>(san_ll: &str, first: Result<T, String>, again: impl FnOnce(&str) -> Result<T, String>) -> Result<T, String> {
+    match first {
+        Err(error)
+            if error.contains("ray query: the acceleration structure operand") && error.contains("has no definition") =>
+        {
+            match native::inline_all_internal_calls_for_retry(san_ll) {
+                Some(inlined) => again(&inlined).map_err(|second| format!("{error}; with the helpers inlined: {second}")),
+                None => Err(error),
+            }
+        }
+        other => other,
+    }
+}
+
 pub fn translate_native_no_retry_constructed_with_options(
+    san_ll: &str,
+    stage: passes::Stage,
+    options: passes::TransformOptions,
+) -> Result<Vec<u8>, String> {
+    let first = translate_native_no_retry_constructed_once(san_ll, stage, options);
+    ray_query_inline_retry(san_ll, first, |inlined| translate_native_no_retry_constructed_once(inlined, stage, options))
+}
+
+fn translate_native_no_retry_constructed_once(
     san_ll: &str,
     stage: passes::Stage,
     options: passes::TransformOptions,
@@ -1373,9 +1402,12 @@ fn translate_sanitized_with_meta(
     datalayout: Option<layout::AirDataLayout>,
 ) -> Result<Vec<u8>, String> {
     passes::validate_kernel_dispatch_options(stage, options)?;
-    translate_sanitized_with_meta_prevalidated_carrier(
-        san_ll, stage, frag, vert, kern, entry_name, tmp, options, datalayout,
-    )
+    let first = translate_sanitized_with_meta_prevalidated_carrier(
+        san_ll, stage, frag, vert, kern, entry_name, tmp, options, datalayout.clone(),
+    );
+    ray_query_inline_retry(san_ll, first, |inlined| {
+        translate_sanitized_with_meta_prevalidated_carrier(inlined, stage, frag, vert, kern, entry_name, tmp, options, datalayout)
+    })
     .map(|finished| finished.bytes)
 }
 
