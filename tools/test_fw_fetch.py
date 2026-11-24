@@ -131,6 +131,23 @@ with tempfile.TemporaryDirectory() as td:
     r = run(pkg, {"FW_TEST_PINS": td + "/short.pins"}, "--dest", d, "--run", td + "/short.run", "--installed", td + "/none")
     check("a driver package without one of the files is refused", r.returncode == 1 and dest_files(d) == [], r.stdout + r.stderr)
 
+    # a copy on a stick or in Downloads (the search list), found with no --run and no network; a wrong copy is skipped
+    stick = td + "/stick"; os.makedirs(stick + "/NullMoth")
+    subprocess.check_call(["cp", run_path, stick + "/NullMoth/NVIDIA-Linux-x86_64-620.70.06.run"])
+    open(stick + "/NVIDIA-Linux-x86_64-620.70.06.run", "wb").write(b"half a download")
+    d = td + "/d8"; os.makedirs(d)
+    r = run(pkg, {"FW_TEST_PINS": td + "/deadgood.pins", "FW_TEST_SEARCH": stick}, "--dest", d, "--installed", td + "/none") \
+        if not pins(td + "/deadgood.pins", run_sha, good, "file://" + td + "/does-not-exist") else None
+    check("NVIDIA's file on a stick is found with no network, and a wrong copy beside it is skipped",
+          r.returncode == 0 and dest_files(d) == sorted(MEMBERS) and "does not match the pin" in r.stdout, r.stdout + r.stderr)
+
+    # a download that stops is continued, not restarted
+    half = td + "/half.run"
+    d = td + "/d9"; os.makedirs(d)
+    r = run(pkg, env, "--dest", d, "--installed", td + "/none")
+    check("the download is resumable (curl -C -) and retried", "-C -" in open(pkg + "/fw_fetch.sh").read() and r.returncode == 0,
+          r.stdout + r.stderr)
+
 # the real pins
 fw = open(ROOT + "/package/fw_fetch.sh").read()
 dl = open(ROOT + "/package/dlss_fetch.sh").read()
