@@ -1,9 +1,54 @@
 --- a/src/nouveau/compiler/nak_nir.c	2026-11-23 19:27:11
-+++ b/src/nouveau/compiler/nak_nir.c	2026-11-23 19:27:11
-@@ -2956,6 +2956,19 @@
++++ b/src/nouveau/compiler/nak_nir.c	2026-11-23 19:36:07
+@@ -2745,8 +2745,43 @@
+       progress |= nir_progress(np > 0, impl, nir_metadata_none);
+    }
+    return progress;
++}
++
++static bool
++split_wide_global_load(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   if (intr->intrinsic != nir_intrinsic_load_global_nv)
++      return false;
++   const unsigned comp_bytes = intr->def.bit_size / 8;
++   const unsigned bytes = comp_bytes * intr->def.num_components;
++   const unsigned align = nir_intrinsic_align(intr);
++   if (bytes <= align || intr->def.num_components == 1 || comp_bytes > align)
++      return false;
++
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
++   const int base = nir_intrinsic_has_base(intr) ? nir_intrinsic_base(intr) : 0;
++   for (unsigned i = 0; i < intr->def.num_components; i++) {
++      nir_def *v = nir_load_global_nv(b, 1, intr->def.bit_size, intr->src[0].ssa, intr->src[1].ssa,
++                                      intr->src[2].ssa);
++      nir_intrinsic_instr *one = nir_def_as_intrinsic(v);
++      if (nir_intrinsic_has_base(one))
++         nir_intrinsic_set_base(one, base + (int)(i * comp_bytes));
++      nir_intrinsic_set_access(one, nir_intrinsic_access(intr));
++      nir_intrinsic_set_align_mul(one, comp_bytes);
++      nir_intrinsic_set_align_offset(one, 0);
++      comps[i] = v;
++   }
++   nir_def_replace(&intr->def, nir_vec(b, comps, intr->def.num_components));
++   return true;
+ }
+ 
++static bool
++nak_nir_split_wide_global_loads(nir_shader *nir)
++{
++   return nir_shader_intrinsics_pass(nir, split_wide_global_load, nir_metadata_control_flow, NULL);
++}
++
+ void
+ nak_postprocess_nir(nir_shader *nir,
+                     const struct nak_compiler *nak,
+@@ -2955,6 +2990,19 @@
+    default:
        UNREACHABLE("Unsupported shader stage");
     }
- 
++
 +   /* NullMoth: split memory accesses once more right before they become NAK loads. A global load wider than its
 +    * alignment reached instruction selection on VFX ray-tracing kernels (3 x 32 bit, align 4: from_nir.rs asserts
 +    * size <= align and the pipeline failed with "Internal compiler error in NAK"); a pass after the split above
@@ -16,7 +61,19 @@
 +                                                             : nak_mem_access_size_align,
 +   };
 +   OPT(nir, nir_lower_mem_access_bit_sizes, &late_split_options);
-+
+ 
     if (OPT(nir, nak_nir_lower_load_store, nak))
        OPT(nir, nir_opt_constant_folding);
+@@ -3039,6 +3087,12 @@
+    if (OPT(nir, nak_nir_rematerialize_load_const))
+       OPT(nir, nir_opt_dce);
  
++   /* NullMoth: the last word on access width. A global load wider than its alignment still reached instruction
++    * selection after both splits on VFX ray-tracing kernels (3 x 32 bit, align 4), and from_nir.rs asserts size <= align
++    * ("Internal compiler error in NAK"). Whatever pass made it, it is split here into loads of one component each,
++    * each at the alignment that component has, with the same predicate and address. */
++   OPT(nir, nak_nir_split_wide_global_loads);
++
+    OPT(nir, nir_convert_to_lcssa, false, false);
+ 
+    if (nak->sm >= 73) {
