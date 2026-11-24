@@ -56,9 +56,10 @@ trap 'exit 1' HUP INT TERM
 fail() {
   echo "   STOP: $*" >&2
   echo "   The GPU firmware comes from NVIDIA's own driver package and is not part of this download." >&2
-  echo "   To supply it by hand: download $URL_RUN" >&2
-  echo "   (SHA-256 $SHA_RUN) and run this installer again with the file next to it as" >&2
-  echo "   NVIDIA-Linux-x86_64-$VER.run, or pass it as --run FILE. Nothing on this Mac was changed." >&2
+  echo "   To supply it by hand: download $URL_RUN on any computer" >&2
+  echo "   (SHA-256 $SHA_RUN), put it in this Mac's Downloads folder, on a USB stick," >&2
+  echo "   or next to this installer as NVIDIA-Linux-x86_64-$VER.run, and run the installer again." >&2
+  echo "   The 1401 stick already carries it in its NullMoth folder. Nothing on this Mac was changed." >&2
   rm -rf "$DEST/nvidia" 2>/dev/null
   exit 1
 }
@@ -81,17 +82,35 @@ fi
 
 # 2./3. NVIDIA's package
 T=$(mktemp -d /var/tmp/nullmoth-fw.XXXXXX) && [ -d "$T" ] && chmod 700 "$T" || fail "cannot create a private folder"
+NAME="NVIDIA-Linux-x86_64-$VER.run"
 if [ -z "$RUN" ]; then
-  # a copy the user left beside the installer
-  for c in "$HERE/NVIDIA-Linux-x86_64-$VER.run" "$HERE/../NVIDIA-Linux-x86_64-$VER.run"; do [ -f "$c" ] && { RUN=$c; break; }; done
+  # A copy the user already has. 3.0 looked only beside the installer, so a Mac with no network and the file in
+  # Downloads or on the 1401 stick still stopped here (#644, #639). Each place is checked; only a copy that matches the
+  # pin is taken, so a wrong or half-downloaded file in one place does not hide a good one in another.
+  U=${SUDO_USER:-$(stat -f %Su /dev/console 2>/dev/null)}
+  UH=""; [ -n "$U" ] && [ "$U" != root ] && UH=$(dscl . -read "/Users/$U" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+  SEARCH=""; [ -n "${FW_TEST_PINS:-}" ] && SEARCH=${FW_TEST_SEARCH:-}   # tests only: no real folders
+  for c in ${SEARCH:+$SEARCH/$NAME $SEARCH/NullMoth/$NAME} "$HERE/$NAME" "$HERE/../$NAME" ${UH:+"$UH/Downloads/$NAME" "$UH/Desktop/$NAME"} "/Users/Shared/$NAME" \
+           /Volumes/*/"$NAME" /Volumes/*/NullMoth/"$NAME"; do
+    [ -f "$c" ] && [ ! -L "$c" ] || continue
+    if [ "$(sha_of "$c")" = "$SHA_RUN" ]; then RUN=$c; echo "   ok  found $c"; break; fi
+    echo "   NOTE $c does not match the pin (an older or unfinished download?); not used"
+  done
 fi
 if [ -n "$RUN" ]; then
   [ -f "$RUN" ] || fail "$RUN does not exist"
   cp "$RUN" "$T/driver.run" || fail "cannot read $RUN"
 else
   echo "   downloading NVIDIA's $VER driver package (about 550 MB) to read the GPU firmware from it"
-  curl -fL --proto "$CURL_PROTO" --tlsv1.2 --retry 3 --connect-timeout 20 -sS -o "$T/driver.run" "$URL_RUN" \
-    || fail "the download from download.nvidia.com failed (no network?)"
+  # resumed where it stopped, up to eight times: a slow or dropping network finishes instead of restarting at 0
+  ok=0
+  for i in 1 2 3 4 5 6 7 8; do
+    if curl -fL --proto "$CURL_PROTO" --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -sS \
+         -C - -o "$T/driver.run" "$URL_RUN"; then ok=1; break; fi
+    echo "   the download stopped (try $i of 8); continuing it"
+    [ -n "${FW_TEST_PINS:-}" ] || sleep $((i * 3))
+  done
+  [ "$ok" = 1 ] || fail "the download from download.nvidia.com did not finish (no network, or it is blocked)"
 fi
 got=$(sha_of "$T/driver.run")
 [ "$got" = "$SHA_RUN" ] || fail "the driver package does not match its pinned SHA-256 (got $got)"
