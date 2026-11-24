@@ -819,9 +819,9 @@ diff -ruN a/src/nouveau/vulkan/nvk_nir_lower_ray_queries.c b/src/nouveau/vulkan/
 +                                   nir_u2u64(b, nir_iadd(b, hw_load_u32(b, blas_app,
 +                                                                         offsetof(struct nvk_hwrt_appendix, geometry_table_offset)),
 +                                                         nir_imul_imm(b, geom, sizeof(struct nvk_hwrt_geometry)))));
-+         nir_def *gentry = nir_build_load_global(b, 2, 32, table, .align_mul = 4);
-+         nir_def *geometry_id_and_flags = nir_channel(b, gentry, 0);
-+         nir_def *first_leaf = nir_channel(b, gentry, 1);
++         /* two 4-byte loads: an entry is 4-byte aligned, and NAK refuses a load wider than its alignment */
++         nir_def *geometry_id_and_flags = hw_load_u32(b, table, 0);
++         nir_def *first_leaf = hw_load_u32(b, table, 4);
 +         nir_def *tri_leaves = hw_load_u32(b, blas, offsetof(struct nvk_bvh_header, leaf_nodes_offset));
 +         nir_def *prim_off = nir_iadd(b, tri_leaves, nir_imul_imm(b, nir_iadd(b, first_leaf, prim), sizeof(struct nvk_bvh_triangle_node)));
 +         nir_def *prim_addr = nir_iadd(b, blas, nir_u2u64(b, prim_off));

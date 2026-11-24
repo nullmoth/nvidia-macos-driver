@@ -1,0 +1,22 @@
+--- a/src/nouveau/compiler/nak_nir.c	2026-11-23 19:27:11
++++ b/src/nouveau/compiler/nak_nir.c	2026-11-23 19:27:11
+@@ -2956,6 +2956,19 @@
+       UNREACHABLE("Unsupported shader stage");
+    }
+ 
++   /* NullMoth: split memory accesses once more right before they become NAK loads. A global load wider than its
++    * alignment reached instruction selection on VFX ray-tracing kernels (3 x 32 bit, align 4: from_nir.rs asserts
++    * size <= align and the pipeline failed with "Internal compiler error in NAK"); a pass after the split above
++    * produced it. Splitting again here leaves every access legal whatever made it, and changes nothing that is
++    * already legal. */
++   nir_lower_mem_access_bit_sizes_options late_split_options = {
++      .modes = nir_var_mem_global | nir_var_mem_ssbo | nir_var_mem_shared | nir_var_shader_temp |
++               nir_var_function_temp | nir_var_mem_constant | nir_var_mem_ubo,
++      .callback = mesa_shader_stage_is_mesh(nir->info.stage) ? nak_mesh_mem_access_size_align
++                                                             : nak_mem_access_size_align,
++   };
++   OPT(nir, nir_lower_mem_access_bit_sizes, &late_split_options);
++
+    if (OPT(nir, nak_nir_lower_load_store, nak))
+       OPT(nir, nir_opt_constant_folding);
+ 
