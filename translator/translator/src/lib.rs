@@ -880,11 +880,20 @@ pub fn translate_native_no_retry_with_options(
 /// once more on the inlined module. Measured on VFX (macOS 26.7.1): vfx_ray_tracer and eight other RT kernels were
 /// refused this way, and loginwindow and SecurityAgent divided by the thread count of the nil pipeline in a loop
 /// (#624, #569). Only that refusal retries, and only when the inliner changed the module.
+/// The refusals that mean a value could not cross a helper call: an acceleration structure kept in a local object
+/// (VFX's RT kernels), and a texture or device pointer a helper returns, which comes back as a bare 64-bit handle
+/// (VFX's pbr_fragment and particle fragment shaders: "SampledImage ... inconsistent" with an i64 image operand, and an
+/// access chain whose base is an i64). Measured on VFX (macOS 26.7.1): LLVM's inliner on the same modules makes all
+/// of them translate and validate.
+fn needs_helper_inline(error: &str) -> bool {
+    (error.contains("ray query: the acceleration structure operand") && error.contains("has no definition"))
+        || error.contains("owned SampledImage image, sampler, and result types are inconsistent")
+        || (error.contains("violates its access-chain contract") && error.contains("(TypeInt 64 0), which is not a pointer type"))
+}
+
 fn ray_query_inline_retry<T>(san_ll: &str, first: Result<T, String>, again: impl FnOnce(&str) -> Result<T, String>) -> Result<T, String> {
     match first {
-        Err(error)
-            if error.contains("ray query: the acceleration structure operand") && error.contains("has no definition") =>
-        {
+        Err(error) if needs_helper_inline(&error) => {
             match native::inline_all_internal_calls_for_retry(san_ll) {
                 Some(inlined) => again(&inlined).map_err(|second| format!("{error}; with the helpers inlined: {second}")),
                 None => Err(error),
@@ -1908,4 +1917,35 @@ pub fn with_parse_cache<R>(f: impl FnOnce() -> R) -> R {
 pub(crate) fn argument_buffer_samplers_on() -> bool {
     ARGBUF_SAMPLERS.with(|c| c.get())
         || matches!(std::env::var("NVMTL_ARGBUF_SAMPLERS").as_deref(), Ok("1"))
+}
+
+#[cfg(test)]
+mod helper_inline_retry_tests {
+    use super::{needs_helper_inline, ray_query_inline_retry};
+
+    #[test]
+    fn the_three_refusals_that_cannot_cross_a_call_retry() {
+        assert!(needs_helper_inline("ray query: the acceleration structure operand %1 has no definition in the entry function"));
+        assert!(needs_helper_inline("native emitter: owned SampledImage image, sampler, and result types are inconsistent"));
+        assert!(needs_helper_inline(
+            "native emitter: owned InBoundsAccessChain violates its access-chain contract: base %3 has type %7 (TypeInt 64 0), which is not a pointer type"
+        ));
+    }
+
+    #[test]
+    fn negative_control_other_refusals_do_not_retry() {
+        assert!(!needs_helper_inline("native emitter: owned Image image, sampler, and result types are inconsistent"));
+        assert!(!needs_helper_inline("ray query: the acceleration structure root %4 is not a StorageBuffer parameter"));
+        assert!(!needs_helper_inline("violates its access-chain contract: the index path leaves the type"));
+        let first: Result<u8, String> = Err("some other refusal".into());
+        let out = ray_query_inline_retry("define void @k() {\n  ret void\n}\n", first, |_| Ok(1));
+        assert_eq!(out, Err("some other refusal".into()));
+    }
+
+    #[test]
+    fn a_module_the_inliner_cannot_change_keeps_the_first_refusal() {
+        let first: Result<u8, String> = Err("ray query: the acceleration structure operand %1 has no definition".into());
+        let out = ray_query_inline_retry("define void @k() {\n  ret void\n}\n", first, |_| Ok(1));
+        assert!(out.is_err(), "nothing to inline: no second attempt");
+    }
 }

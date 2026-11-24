@@ -52,6 +52,13 @@ pub(super) fn inline_direct_function_pointer_consumers(
 /// Every non-recursive internal call inlined into its caller, for the last emission attempt: a pointer the entry stores into
 /// a field of a local object and a helper loads back (Blender's MTLShaderComputeImpl: a threadgroup array's address in a
 /// member, read in `main`) only resolves once the store and the load are in one function. None when nothing changes.
+/// The same whole-module inline without the shape gate, for the retry after a refusal that names a value which could
+/// not cross a helper call (lib.rs needs_helper_inline): inlining keeps the program's meaning, and the alternative is a
+/// refused pipeline.
+pub(super) fn inline_all_internal_calls_ungated(san_ll: &str) -> Option<String> {
+    try_inline(san_ll, None).filter(|out| out != san_ll)
+}
+
 pub(super) fn inline_all_internal_calls(san_ll: &str) -> Option<String> {
     if !entry_stores_qualified_pointer_argument(san_ll) {
         return None;

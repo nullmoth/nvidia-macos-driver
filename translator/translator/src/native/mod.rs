@@ -19,6 +19,7 @@ mod local_field_forward;
 /// ray-query lowering runs after emission and sees the same shape only there.
 pub(crate) fn inline_all_internal_calls_for_retry(san_ll: &str) -> Option<String> {
     let out = inline::inline_all_internal_calls(san_ll)
+        .or_else(|| inline::inline_all_internal_calls_ungated(san_ll))
         .map(|inlined| local_field_forward::forward_local_pointer_fields(&inlined).unwrap_or(inlined));
     if let (Some(path), Some(text)) = (std::env::var_os("NVMTL_INLINE_RETRY_DUMP"), out.as_ref()) {
         let _ = std::fs::write(path, text);
