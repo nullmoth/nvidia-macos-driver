@@ -105,9 +105,16 @@ fn emit_vulkan_spirv_inner(
             Ok(emitted) => return Ok(emitted),
             Err(failure) => failure,
         };
+        // An acceleration structure the entry stores into a local object (VFX's `Raytracer { ..., accel, table }`)
+        // and a helper loads back is the same shape as an unmodeled placeholder: the value cannot cross the call,
+        // so the ray-query lowering finds it "defined nowhere". Inlining the helpers puts the load next to the
+        // store. Measured on VFX (macOS 26.7.1): vfx_ray_tracer and the eight other RT kernels were refused this
+        // way, and loginwindow divided by the thread count of the nil pipeline (#624, #569).
         let whole_inline = failure.rejected.cursor_call_sites.is_empty()
             && !inlined_all
-            && failure.error.contains("an unmodeled pointer placeholder");
+            && (failure.error.contains("an unmodeled pointer placeholder")
+                || (failure.error.contains("ray query: the acceleration structure operand")
+                    && failure.error.contains("has no definition")));
         let Some(spliced) = (if whole_inline {
             inlined_all = true;
             inline::inline_all_internal_calls(&source)
