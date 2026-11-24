@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.1
+
+### Fixes
+- The lock screen and login window crashing in a loop (SecurityAgent or loginwindow, "Floating point exception" in VFX, #624 #569): the user picture is drawn by VFX, and nine of its ray-tracing kernels could not be built, so VFX divided by the thread count of a pipeline that did not exist. The shader translator now follows a value a shader keeps in a local structure and reads back in a helper (VFX keeps its acceleration structure that way), and returns of textures and pointers from helpers. Every compute kernel in VFX now builds (312 of 312; 3.0 built 249 and refused 27), and eight VFX fragment shaders that were refused build too.
+- The shader compiler stopped with "Internal compiler error in NAK" on some large kernels: a memory read wider than its alignment reached the last compiler stage. It is split into reads the hardware accepts.
+- The accelerator and the display driver refused to start, without a word, on the second start after a failed one, while the GPU itself was up (#633). Every driver now gets the same answer from the boot guard for the whole start.
+- Installing with no internet: the installer finds NVIDIA's driver package (the GPU firmware's source) in Downloads, on the Desktop, in /Users/Shared, or on a USB stick such as the 1401 stick, and a download that stops is continued instead of restarted (#644 #639).
+- The 1401 Mac app sitting on "installing" with nothing moving (#598): the 550 MB NVIDIA package download now prints its progress.
+- The Ryzen laptop power profile never applied (#590 #631): its helper was linked without the identifier macOS 26 requires and was refused at every start.
+
 ## 3.0
 
 ### Fixes
