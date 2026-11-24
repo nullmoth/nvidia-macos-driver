@@ -5200,7 +5200,7 @@ static NSData *nvmtl_address_shader_g0(const void *data, size_t len, uint32_t fl
     }
     uint8_t *out = NULL; size_t n = 0; char err[512] = {0};
     const int ubo = nvmtl_table_ubo();
-    const int ex = xlate_lower_ex && (nvmtl_align_guard_on() || ubo);
+    const int ex = xlate_lower_ex && (nvmtl_align_guard_on() || ubo || (flags & 8u));
     if (ex ? xlate_lower_ex(data, len, flags | (ubo ? 2u : 0u), &out, &n, info, err, sizeof err) : xlate_lower(data, len, &out, &n, err, sizeof err)) {
         if (info) memset(info, 0, 4 * sizeof *info);
         if (said++ < 40) nvlog("address lowering REFUSED, shader kept as-is: %s", err);
@@ -6163,11 +6163,6 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     if (!g_heapSet && nvmtl_spirv_uses_set(cs, n / 4, 2)) {
         nvlog("vk: compute pipeline REFUSED - the kernel indexes the bindless heap (set 2) and this device has none"); return -1; }
     memset(out, 0, sizeof *out);
-    if (!(flags & 1) && ag[0]) {
-        if (!(out->ag_src = malloc(ag_srcn))) { nvlog("align guard: out of memory keeping a module's source - pipeline REFUSED"); return -1; }
-        memcpy(out->ag_src, ag_src, ag_srcn); out->ag_srcn = ag_srcn; out->ag_mask = ag[0]; out->ag_req = ag[1] >= 8 ? ag[1] : 8;
-        atomic_fetch_add(&g_ag_guarded, 1);
-    }
     if (!nvmtl_spirv_ok(cs, n, "compute module")) return -1;
     out->stex_hi[0] = nvmtl_spirv_stex_hi(cs, n);
     nvmtl_spirv_texel_mask(cs, n, out->tbm[0]); memset(out->tbm[1], 0, sizeof out->tbm[1]);
@@ -6175,6 +6170,17 @@ static int nvmtl_vk_compute_pipeline_create_g_lifetime_body(const void *cs, size
     out->lin = nvmtl_spirv_has_specid(cs, n / 4, 3);
     out->bmask_ok = (uint32_t)nvmtl_spirv_bmask(cs, n, out->bmask);
     out->bmask2_ok = (uint32_t)nvmtl_spirv_bmask_x(cs, n, out->bmask2, 1);
+    const uint32_t ssbo_mask = (!(flags & 8u) && out->bmask_ok) ? (uint32_t)(out->bmask[0] & 0xffffffffu) : 0u;
+    const int want_ag = !(flags & 1u) && ag[0];
+    if (want_ag || ssbo_mask) {
+        if (!(out->ag_src = malloc(ag_srcn))) { nvlog("align guard: out of memory keeping a module's source - pipeline REFUSED"); return -1; }
+        memcpy(out->ag_src, ag_src, ag_srcn); out->ag_srcn = ag_srcn;
+        out->ssbo_mask = ssbo_mask;
+        if (want_ag) {
+            out->ag_mask = ag[0]; out->ag_req = ag[1] >= 8 ? ag[1] : 8;
+            atomic_fetch_add(&g_ag_guarded, 1);
+        }
+    }
     VkShaderModuleCreateInfo smi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, NULL, 0, n, (const uint32_t *)cs };
     VkShaderModule mod = VK_NULL_HANDLE;
     VKCK(pvkCreateShaderModule(g_dev, &smi, NULL, &mod), "vkCreateShaderModule(compute)");
@@ -6219,8 +6225,45 @@ static pthread_mutex_t g_var_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_ag_lock = PTHREAD_MUTEX_INITIALIZER;
 static nvk_pipeline *nvmtl_align_guard_pick(nvk_cmdbuf *c, nvk_pipeline *p)
 {
-    if (!p->ag_mask) return p;
     const nvmtl_bindtable *t = (const nvmtl_bindtable *)c->table;
+    // A buffer slot kept as a Vulkan StorageBuffer descriptor (data-indexed runtime array) cannot be bound at an
+    // offset that is not 16-aligned (Vulkan minStorageBufferOffsetAlignment). Metal allows 4-byte offsets (e.g.
+    // ggml-metal COPY / GET_ROWS sub-tensors). Lazily rebuild the kernel with all buffer bindings lowered through
+    // the BDA address table (flags 8|1: full BDA + scalar-safe alignments) so arbitrary byte offsets work in place.
+    if (p->ssbo_mask && t) {
+        int bad_ssbo = -1; size_t bad_off = 0;
+        for (uint32_t b = 0; b < 32 && b < NVMTL_NBUF; b++) {
+            if (!(p->ssbo_mask & (1u << b))) continue;
+            const nvmtl_slot *s = &t->s[0][b];
+            if (s->kind == NVMTL_SLOT_BUF && (s->off % NVMTL_SSBO_ALIGN) != 0) {
+                bad_ssbo = (int)b; bad_off = s->off; break;
+            }
+        }
+        if (bad_ssbo >= 0) {
+            nvk_pipeline *discard = NULL;
+            pthread_mutex_lock(&g_ag_lock);
+            nvk_pipeline *bp = (nvk_pipeline *)p->ssbo_bda;
+            if (!bp && !p->ssbo_bda_tried && p->ag_src) {
+                p->ssbo_bda_tried = 1;
+                bp = calloc(1, sizeof *bp);
+                if (bp && nvmtl_vk_compute_pipeline_create_g(p->ag_src, p->ag_srcn, 8u | 1u, bp)) {
+                    free(bp); bp = NULL;
+                }
+                if (bp && bp->bmask_ok && (bp->bmask[0] & (1ull << bad_ssbo))) {
+                    discard = bp; bp = NULL;
+                }
+                p->ssbo_bda = bp;
+                nvlog("align guard: buffer %d bound at offset %zu (not %d-aligned) - %s",
+                      bad_ssbo, bad_off, NVMTL_SSBO_ALIGN,
+                      bp ? "this kernel now runs its full-BDA SAFE module on unaligned bindings"
+                         : "full-BDA rebuild unavailable - keeping descriptor module");
+            }
+            pthread_mutex_unlock(&g_ag_lock);
+            if (discard) { nvmtl_vk_pipeline_destroy(discard); free(discard); }
+            if (bp) return bp;
+        }
+    }
+    if (!p->ag_mask) return p;
     const uint64_t m = (uint64_t)p->ag_req - 1;
     int bad = -1; uint64_t at = 0;
     for (uint32_t b = 0; b < 32 && b < NVMTL_NBUF; b++) {
@@ -7194,6 +7237,7 @@ void nvmtl_vk_cmd_dispatch_indirect_tg(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffe
 }
 void nvmtl_vk_cmd_dispatch(nvk_cmdbuf *c, nvk_pipeline *p, uint32_t gx, uint32_t gy, uint32_t gz)
 {
+    if (!(p = nvmtl_align_guard_pick(c, p))) { c->skipped++; return; }
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)p->pipe);
     VkDescriptorSet s[3] = { nvmtl_snapshot_set_t(c, 0, p->stex_hi[0], p->tbany ? p->tbm[0] : NULL),
                              nvmtl_snapshot_set_t(c, 1, p->stex_hi[1], p->tbany ? p->tbm[1] : NULL), g_heapSet };
@@ -9629,6 +9673,7 @@ void nvmtl_vk_cmd_draw_indexed_indirect(nvk_cmdbuf *c, nvk_buffer *idx, size_t i
 }
 void nvmtl_vk_cmd_dispatch_indirect(nvk_cmdbuf *c, nvk_pipeline *p, nvk_buffer *b, size_t off)
 {
+    if (!(p = nvmtl_align_guard_pick(c, p))) { c->skipped++; return; }
     pvkCmdBindPipeline(c->cb, VK_PIPELINE_BIND_POINT_COMPUTE, (VkPipeline)p->pipe);
     if (c->nobind) return;
     nvmtl_fx_note_dispatch(c, p);
@@ -11989,8 +12034,10 @@ void nvmtl_vk_pipeline_destroy(nvk_pipeline *p)
     nvmtl_destroy_pipe_once(seen, &nseen, 64, (VkPipeline)p->pipe);
     pthread_mutex_lock(&g_ag_lock);
     nvk_pipeline *safe = (nvk_pipeline *)p->ag_safe; p->ag_safe = NULL;
+    nvk_pipeline *bda = (nvk_pipeline *)p->ssbo_bda; p->ssbo_bda = NULL;
     pthread_mutex_unlock(&g_ag_lock);
     if (safe) { nvmtl_vk_pipeline_destroy(safe); free(safe); }
+    if (bda) { nvmtl_vk_pipeline_destroy(bda); free(bda); }
     pthread_mutex_lock(&g_rpv_lock);
     for (uint32_t i = 1; i < 4; i++) if (p->rpv[i] && p->rpv[i] != p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rpv[i], NULL);
     for (uint32_t i = 0; i < p->nrpx; i++) if (p->rpx[i] && p->rpx[i] != p->rp) pvkDestroyRenderPass(g_dev, (VkRenderPass)p->rpx[i], NULL);
