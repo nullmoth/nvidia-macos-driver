@@ -87,6 +87,8 @@ c30 = next((l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "n
 c29 = [l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "nvk-diag-nofollow\" ;;" in l]
 arm("the 3.0 set applies it last", c30.rstrip().endswith('nvk-stream-uncached" ;;'))
 arm("the 2.9 set is unchanged, so 2.9 still rebuilds as shipped", len(c29) == 1)
-arm("the release build uses the 3.0 set", '"$OUT/nvk-build" 3.0 ||' in inputs)
+c31 = next((l for l in bld.splitlines() if l.strip().startswith("CHAIN=") and "nvk-nak-late-split" in l), "")
+arm("the 3.1 set keeps it, followed only by the late access split", 'nvk-stream-uncached nvk-nak-late-split" ;;' in c31)
+arm("the release build uses the 3.1 set", '"$OUT/nvk-build" 3.1 ||' in inputs)
 print("FAILED" if fails else "all ok")
 sys.exit(1 if fails else 0)
