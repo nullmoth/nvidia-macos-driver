@@ -24,6 +24,8 @@ Link NVRM against the resulting `libnvkms.a`, not the original archive. The scri
 
 `620-yuv420-hw.patch` applies to `kapi/src/nvkms-kapi.c` of NVIDIA 620.70.06 with the patches above already applied. HDMI 4K60 that RGB 4:4:4 cannot carry (a DisplayPort-to-HDMI adapter, or a TMDS link limited to HDMI 1.4 rates) was refused by NVKMS, so such a display stayed at 4K30. A mode refused as RGB is now listed, validated and set again with the YUV 4:2:0 preference when that retry is valid, decided as hardware 4:2:0, and has the same timing; the head is then set with `yuv420Mode` hardware. Modes RGB already accepts are untouched. Idea and first implementation by backdash756 (pull request 459, limited to one rig's handles); this one is general.
 
+`620-z-max-pclk.patch` applies after it. The macOS boot argument `nvkmsnomaxpclk=1` bypasses maximum pixel-clock validation when enumerating, validating and setting display modes. The check remains enabled by default; `sysctl debug.nvrm_kms_skip_max_pclk` reports the boot-time setting.
+
 Applying the chain: every patch here applies with `--fuzz=0` to a pristine open-gpu-kernel-modules 620.70.06, in file-name order
 (`610-` and `615-` patches keep their names). `610-display-completion.patch` was rewritten for 620 (its flip-pending function is
 inserted before `FramebufferConsoleDisabled`, and the function table entry was added; the 620 header already declares
