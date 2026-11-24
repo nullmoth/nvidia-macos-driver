@@ -24,9 +24,9 @@
 //!
 //! DELIBERATELY NARROW. A table is rewritten only when all of this holds, and is left to the existing
 //! error otherwise:
-//!   * its only users are lifetime markers, no-op bitcasts used only by lifetime markers, and
-//!     `getelementptr [N x ptr addrspace(K)]` slots (or the alloca itself as slot 0);
-//!   * every slot is used only by a whole-pointer store or load of `ptr addrspace(K)`;
+//!   * its users are lifetime markers, `getelementptr [N x ptr addrspace(K)]` slots and
+//!     no-op bitcasts of the table or a constant-index slot;
+//!   * every slot and its aliases are accessed only by whole-pointer stores or loads of `ptr addrspace(K)`;
 //!   * every stored pointer is the base itself or ONE `getelementptr inbounds T, base, i64 idx`, with the
 //!     same `T` and the same base for every store;
 //!   * that base, after no-op bitcasts, is a function argument or a global, so it dominates every load.
@@ -83,7 +83,8 @@ struct Table {
     alloca: usize,
     count: String,
     space: String,
-    slots: Vec<(usize, String)>,      // slot GEP lines (and the alloca itself as slot 0)
+    slots: Vec<usize>,
+    first_slot_views: Vec<(usize, String)>,
     stores: Vec<(usize, String)>,     // (line, index operand)
     loads: Vec<(usize, String, String)>, // (line, loaded name, slot name)
     base: String,
@@ -122,8 +123,16 @@ fn analyse(lines: &[&str], span: (usize, usize), alloca: usize, count: &str, spa
         None
     };
 
-    let mut slots = vec![(alloca, name.to_string())];
-    let mut views: Vec<usize> = Vec::new();
+    let is_slot_view = |rhs: &str, slot: &str| {
+        rhs.strip_prefix("bitcast ptr ").and_then(|rest| rest.strip_suffix(" to ptr")) == Some(slot)
+    };
+    #[derive(Clone, Copy)]
+    enum SlotKind {
+        TableBase,
+        Fixed,
+        Dynamic,
+    }
+    let mut slots = vec![(alloca, name.to_string(), SlotKind::TableBase)];
     for i in span.0 + 1..span.1 {
         if i == alloca || !uses_value(lines[i], name) {
             continue;
@@ -133,45 +142,63 @@ fn analyse(lines: &[&str], span: (usize, usize), alloca: usize, count: &str, spa
             continue;
         }
         let (d, rhs) = def(lines[i])?;
-        if let Some(rest) = rhs.strip_prefix("bitcast ptr ") {
-            // a no-op view of the table, allowed only if lifetime markers are all it feeds
-            (rest.split_once(" to ")?.0.trim() == name).then_some(())?;
-            let only_lifetime = (span.0 + 1..span.1).filter(|&j| j != i && uses_value(lines[j], d)).all(|j| {
-                let u = lines[j].trim();
-                LIFETIME.iter().any(|l| u.starts_with(l))
-            });
-            only_lifetime.then_some(())?;
-            views.push(i);
+        if is_slot_view(rhs, name) {
             continue;
         }
         let gep = rhs
             .strip_prefix("getelementptr inbounds ")
             .or_else(|| rhs.strip_prefix("getelementptr "))?;
         let rest = gep.strip_prefix(&table_ty)?.strip_prefix(", ptr ")?;
-        (rest.split(',').next()?.trim() == name).then_some(())?;
-        slots.push((i, d.to_string()));
+        let (base, indices) = rest.split_once(',')?;
+        (base.trim() == name).then_some(())?;
+        let constant_indices = indices
+            .split(',')
+            .take_while(|index| !index.trim_start().starts_with('!'))
+            .all(|index| {
+                index.split_whitespace().last().is_some_and(|value| value.parse::<i64>().is_ok())
+            });
+        let kind = if constant_indices {
+            SlotKind::Fixed
+        } else {
+            SlotKind::Dynamic
+        };
+        slots.push((i, d.to_string(), kind));
     }
+    let slot_geps = slots.iter().skip(1).map(|(line, _, _)| *line).collect();
 
     let mut stores = Vec::new();
     let mut loads = Vec::new();
+    let mut first_slot_views = Vec::new();
     let mut base: Option<String> = None;
     let mut elem: Option<String> = None;
-    for (si, slot) in &slots {
+    let mut next_slot = 0;
+    while let Some((si, slot, kind)) = slots.get(next_slot).cloned() {
+        next_slot += 1;
+        let at_table_base = matches!(kind, SlotKind::TableBase);
+        let mut accessed = false;
         for i in span.0 + 1..span.1 {
-            if i == *si || !uses_value(lines[i], slot) {
+            if i == si || !uses_value(lines[i], &slot) {
                 continue;
             }
-            if views.contains(&i) || slots.iter().any(|(j, _)| *j == i) {
-                continue; // a slot GEP naming the alloca, handled as its own slot
+            if slots.iter().any(|(j, _, _)| *j == i) {
+                continue;
             }
             let t = lines[i].trim();
-            if LIFETIME.iter().any(|l| t.starts_with(l)) && slot == name {
+            if LIFETIME.iter().any(|l| t.starts_with(l)) && at_table_base {
+                continue;
+            }
+            if let Some((alias, _)) = def(lines[i]).filter(|(_, rhs)| is_slot_view(rhs, &slot)) {
+                // 动态设备指针槽的别名保留现有 BDA 路径。
+                if matches!(kind, SlotKind::Dynamic) {
+                    return None;
+                }
+                slots.push((i, alias.to_string(), kind));
                 continue;
             }
             if let Some(rest) = t.strip_prefix(&format!("store {ptr_ty} ")) {
                 let (value, rest) = rest.split_once(", ptr ")?;
                 (rest.split(',').next()?.trim() == slot).then_some(())?;
-                (!uses_value(value, slot)).then_some(())?;
+                (!uses_value(value, &slot)).then_some(())?;
                 let (b, e, idx) = if let Some(r) = root_of(value.trim()) {
                     (r, None, "0".to_string())
                 } else {
@@ -192,12 +219,17 @@ fn analyse(lines: &[&str], span: (usize, usize), alloca: usize, count: &str, spa
                     }
                 }
                 stores.push((i, idx));
+                accessed = true;
                 continue;
             }
             let (d, rhs) = def(lines[i])?;
             let rest = rhs.strip_prefix(&format!("load {ptr_ty}, ptr "))?;
             (rest.split(',').next()?.trim() == slot).then_some(())?;
             loads.push((i, d.to_string(), slot.clone()));
+            accessed = true;
+        }
+        if at_table_base && accessed {
+            first_slot_views.push((si, slot));
         }
     }
     if stores.is_empty() || loads.is_empty() {
@@ -207,7 +239,8 @@ fn analyse(lines: &[&str], span: (usize, usize), alloca: usize, count: &str, spa
         alloca,
         count: count.to_string(),
         space: space.to_string(),
-        slots,
+        slots: slot_geps,
+        first_slot_views,
         stores,
         loads,
         base: base?,
@@ -237,19 +270,22 @@ fn rewrite(ll: &str) -> Option<String> {
     let mut changed = false;
     for span in spans {
         for i in span.0 + 1..span.1 {
-            let Some((_, rhs)) = def(lines[i]) else { continue };
+            let Some((name, rhs)) = def(lines[i]) else { continue };
             let Some((count, space)) = table_alloca(rhs) else { continue };
             let Some(t) = analyse(&lines, span, i, &count, &space) else { continue };
             let ptr_ty = format!("ptr addrspace({})", t.space);
             let old_ty = format!("[{} x {ptr_ty}]", t.count);
             let new_ty = format!("[{} x i64]", t.count);
             out[t.alloca] = lines[t.alloca].replacen(&old_ty, &new_ty, 1);
-            for (si, _) in &t.slots {
-                if *si != t.alloca {
-                    out[*si] = lines[*si].replacen(&old_ty, &new_ty, 1);
-                }
+            for si in &t.slots {
+                out[*si] = lines[*si].replacen(&old_ty, &new_ty, 1);
             }
             let indent = |l: &str| l.len() - l.trim_start().len();
+            for (line, slot) in &t.first_slot_views {
+                let l = lines[*line];
+                let pad = &l[..indent(l)];
+                out[*line] = format!("{pad}{slot} = getelementptr inbounds {new_ty}, ptr {name}, i64 0, i64 0");
+            }
             for (si, idx) in &t.stores {
                 let l = lines[*si];
                 let slot = l.trim().split(", ptr ").nth(1).and_then(|r| r.split(',').next()).unwrap_or("").trim();
@@ -333,6 +369,28 @@ mod tests {
             "the loaded pointer must be rebuilt from the base argument:\n{out}"
         );
         assert!(!out.contains("x ptr addrspace(1)]"), "no pointer table may remain:\n{out}");
+    }
+
+    #[test]
+    fn fixed_slots_through_noop_bitcasts_can_be_read_by_dynamic_index() {
+        let ll = ROWS.replace(
+            "  %32 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %7, i64 0, i64 %j\n  store ptr addrspace(1) %30, ptr %32, align 8, !tbaa !41\n",
+            concat!(
+                "  %first = bitcast ptr %7 to ptr\n",
+                "  store ptr addrspace(1) %30, ptr %first, align 8\n",
+                "  %second = getelementptr inbounds [2 x ptr addrspace(1)], ptr %7, i64 0, i64 1\n",
+                "  %second.view = bitcast ptr %second to ptr\n",
+                "  store ptr addrspace(1) %1, ptr %second.view, align 8\n",
+            ),
+        );
+        let out = rewrite(&ll).expect("no-op bitcasts preserve table slots");
+        assert!(out.contains("%10 = bitcast ptr %7 to ptr\n"), "{out}");
+        assert!(out.contains("%first = getelementptr inbounds [2 x i64], ptr %7, i64 0, i64 0\n"), "{out}");
+        assert!(out.contains("store i64 %r, ptr %first, align 8\n"), "{out}");
+        assert!(out.contains("store i64 0, ptr %second.view, align 8\n"), "{out}");
+        assert!(out.contains("%ptrtab.41 = load i64, ptr %40, align 8\n"), "{out}");
+        assert!(rewrite(&ll.replace("  ret void", "  call void @sink(ptr %second.view)\n  ret void")).is_none());
+        assert!(rewrite(&ll.replace("ptr %7, i64 0, i64 1", "ptr %7, i64 0, i64 %j")).is_none());
     }
 
     #[test]
