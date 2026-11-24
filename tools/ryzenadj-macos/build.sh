@@ -13,11 +13,14 @@ OUT=${2:?usage: build.sh <RyzenAdj checkout> <out dir>}
 mkdir -p "$OUT"
 # a reproducible binary: no build paths, no timestamps in the Mach-O (the linker's own UUID is dropped)
 xcrun clang -arch x86_64 -mmacosx-version-min=15.0 -O2 -std=gnu2x -D_LIBRYZENADJ_INTERNAL -DNDEBUG \
-  -ffile-prefix-map="$SRC"=ryzenadj -ffile-prefix-map="$HERE"=nullmoth -g0 -Wl,-no_uuid \
+  -ffile-prefix-map="$SRC"=ryzenadj -ffile-prefix-map="$HERE"=nullmoth -g0 \
   -Wno-deprecated-declarations \
   -I"$SRC/lib" "$HERE/osdep_macos.c" "$SRC/lib/nb_smu_ops.c" "$SRC/lib/api.c" "$SRC/lib/cpuid.c" "$SRC/argparse.c" "$SRC/main.c" \
   -framework IOKit -framework CoreFoundation -o "$OUT/ryzenadj"
 strip -x "$OUT/ryzenadj"
+# dyld on macOS 26 refuses an executable with no LC_UUID ("missing LC_UUID load command", #590 #631): 3.0 linked with
+# -no_uuid and the power job never ran. The linker's UUID is a hash of the output, so the build stays reproducible.
+otool -l "$OUT/ryzenadj" | grep -q LC_UUID || { echo "STOP: ryzenadj has no LC_UUID; dyld will refuse it"; exit 1; }
 # the entitlement NMSMN requires of its caller, in an ad-hoc signature (deterministic: no timestamp, no identity)
 cat > "$OUT/ryzenadj.entitlements" <<'ENT'
 <?xml version="1.0" encoding="UTF-8"?>
