@@ -104,9 +104,20 @@ else
   echo "   downloading NVIDIA's $VER driver package (about 550 MB) to read the GPU firmware from it"
   # resumed where it stopped, up to eight times: a slow or dropping network finishes instead of restarting at 0
   ok=0
+  # a progress line every 15 s: the download is silent otherwise, and the 1401 Mac app sat on "installing" for
+  # minutes with nothing moving (#598)
   for i in 1 2 3 4 5 6 7 8; do
-    if curl -fL --proto "$CURL_PROTO" --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -sS \
-         -C - -o "$T/driver.run" "$URL_RUN"; then ok=1; break; fi
+    curl -fL --proto "$CURL_PROTO" --tlsv1.2 --connect-timeout 20 --speed-limit 1024 --speed-time 60 -sS \
+         -C - -o "$T/driver.run" "$URL_RUN" &
+    cpid=$!
+    tick=0
+    while kill -0 "$cpid" 2>/dev/null; do
+      sleep 1; tick=$((tick + 1))
+      [ $((tick % 15)) = 0 ] && kill -0 "$cpid" 2>/dev/null || continue
+      have=$(stat -f %z "$T/driver.run" 2>/dev/null || echo 0)
+      echo "   downloaded $((have / 1048576)) MB of about 550 MB"
+    done
+    if wait "$cpid"; then ok=1; break; fi
     echo "   the download stopped (try $i of 8); continuing it"
     [ -n "${FW_TEST_PINS:-}" ] || sleep $((i * 3))
   done
