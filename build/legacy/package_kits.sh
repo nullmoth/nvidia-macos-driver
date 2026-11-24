@@ -38,6 +38,8 @@ for rel in 10.7 10.8 10.9 10.10 10.11 10.12 10.13 10.14 10.15 11 12 13 14; do
   find "$D" -name .DS_Store -delete
   ( cd "$D" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 shasum -a 256 > SHA256SUMS ) || die "sums $rel"
   ( cd "$D" && shasum -a 256 -c SHA256SUMS >/dev/null ) || die "sums do not verify $rel"
+  # no build machine's folder names in what ships (3.0's kits carried them in four binaries and the link log)
+  python3 "$(dirname "$0")/scrub_kit.py" "$P/$N" || die "scrub $rel"
   # a plain ustar archive without extended attributes or resource forks: 10.7's tar must read it
   ( cd "$P" && COPYFILE_DISABLE=1 tar --format ustar --no-xattrs --no-mac-metadata -czf "$N.tar.gz" "$N" ) || die "archive $rel"
   s=$(shasum -a 256 "$P/$N.tar.gz" | cut -d' ' -f1)
