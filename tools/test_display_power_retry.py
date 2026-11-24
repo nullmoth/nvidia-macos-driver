@@ -48,6 +48,8 @@ struct NVRMNVDAFramebuffer {
     void handleEvent(int event) { if(event==kIOFBNotifyDidPowerOn) notifications++; }
     bool rmGpuReady() { return gpuReady; }
     void familyDidWake() { familyWakes++; notifications++; pagingState=true; }
+    void *fGpuWake=(void *)1; unsigned gpuWakeQueued=0;
+    void scheduleCall(void *, unsigned long long) { gpuWakeQueued++; }
     bool setHeadPower(bool awake);
     IOReturn setPowerState(unsigned long ordinal,IOService *device);
 };
@@ -62,6 +64,8 @@ int main() {
     f.wakeOK=false; f.setPowerState(1,nullptr);
     // a failed wake stays retryable, and WindowServer is still told the display is on (1.14.7 behaviour)
     assert(f.fHeadSlept && f.wakes==1 && f.notifications==1);
+    // ... and it queues the GPU wake call, because nothing else asks for head power after a system wake
+    assert(f.gpuWakeQueued==1);
     // the display's audio is published again only once the head really is back (PR #366)
     assert(f.audioPublishes==0);
     f.wakeOK=true; f.setPowerState(1,nullptr);
