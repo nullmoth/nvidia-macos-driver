@@ -12334,6 +12334,48 @@ merge:
 }
 
 #[test]
+fn native_ptr_access_chain_contract_on_struct_buffer_and_function_alloca() {
+    let ll = r#"
+target triple = "air64-apple-macosx15.0.0"
+
+define void @k(ptr addrspace(1) %src, ptr addrspace(1) %dst, i32 %tid) {
+entry:
+  %scratch = alloca [4 x float], align 4
+  %s0 = getelementptr inbounds [4 x float], ptr %scratch, i32 0, i32 0
+  store float 1.0, ptr %s0, align 4
+  %s1 = getelementptr inbounds [4 x float], ptr %scratch, i32 0, i32 1
+  store float 2.0, ptr %s1, align 4
+  %c = icmp eq i32 %tid, 0
+  %psel = select i1 %c, ptr %s0, ptr %s1
+  %lv = load float, ptr %psel, align 4
+  %idx64 = zext i32 %tid to i64
+  %sp = getelementptr inbounds float, ptr addrspace(1) %src, i64 %idx64
+  %sv = load float, ptr addrspace(1) %sp, align 4
+  %sum = fadd float %lv, %sv
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i64 %idx64
+  store float %sum, ptr addrspace(1) %dp, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"src"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"dst"}
+!5 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+    let spv = crate::translate_native_no_retry_constructed_with_options(
+        ll,
+        Stage::Kernel,
+        crate::passes::TransformOptions::default(),
+    )
+    .expect("Function alloca select with provenance and StorageBuffer GEP must translate");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("OpStore"), "{asm}");
+}
+
+#[test]
 fn native_forward_unmodeled_device_gep_phi_uses_typed_zero_not_pointer_phi() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"

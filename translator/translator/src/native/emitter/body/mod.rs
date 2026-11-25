@@ -24,11 +24,13 @@ pub(super) struct PtrAccessChainInputs {
 
 #[allow(clippy::nonminimal_bool)]
 pub(super) fn decide_ptr_access_chain(i: PtrAccessChainInputs) -> bool {
+    let local_storage = matches!(i.base_storage, StorageClass::Function | StorageClass::Private);
     let scalar_ptr_access_chain = !i.pointee_points_to_aggregate
         && ptr_access_chain_allowed_storage(i.base_storage)
         && (!i.is_indexed_container_root || i.struct_base_stride || i.array_base_stride)
         && i.first_index_nonzero;
-    (!i.base_is_pointer_phi || ptr_access_chain_allowed_storage(i.base_storage))
+    !local_storage
+        && (!i.base_is_pointer_phi || ptr_access_chain_allowed_storage(i.base_storage))
         && (!i.was_composed || scalar_ptr_access_chain)
         && (!i.base_is_param || scalar_ptr_access_chain)
         && (!i.base_points_to_aggregate || scalar_ptr_access_chain)
