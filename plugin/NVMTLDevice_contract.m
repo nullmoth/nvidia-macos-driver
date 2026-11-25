@@ -7,6 +7,30 @@
 #import <Metal/Metal.h>
 #import "NVMTLObjects.h"
 #import <IOSurface/IOSurfaceRef.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
+static BOOL nvmtl_host_range_readonly(const void *ptr, size_t len) {
+    if (!ptr || !len) return NO;
+    mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)ptr;
+    const mach_vm_address_t end = addr + (mach_vm_size_t)len;
+    if (end < addr) return NO;
+    while (addr < end) {
+        mach_vm_address_t cur = addr;
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj = MACH_PORT_NULL;
+        kern_return_t kr = mach_vm_region(mach_task_self(), &cur, &size, VM_REGION_BASIC_INFO_64,
+                                          (vm_region_info_t)&info, &count, &obj);
+        if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+        if (kr != KERN_SUCCESS || cur > addr || !size) return NO;
+        if (!(info.protection & VM_PROT_WRITE)) return YES;
+        if (size >= end - cur) break;
+        addr = cur + size;
+    }
+    return NO;
+}
 @implementation NVMTLDevice (Contract)
 - (NSUInteger)doubleFPConfig { return 0; }
 - (NSUInteger)featureProfile { return 10002; }
@@ -81,7 +105,9 @@ static void nvbt(const char *tag, int *count, int max);
             if (s && nvmtl_swc_init(s, a1) == 0 && nvmtl_vk_buffer_create(a1, 1, &b->_shadow) == 0 && b->_shadow.map &&
                 nvmtl_vk_buffer_create(a1, 0, &b->_b) == 0 && !b->_b.map) {
                 b->_hostPtr = a0; b->_hostLen = (size_t)a1; b->_swc = s;
-                { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes at %p cannot be imported -> VRAM copy with owned staging", (unsigned long)a1, a0); }
+                b->_hostReadOnly = nvmtl_host_range_readonly(a0, (size_t)a1);
+                { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: managed %lu bytes at %p cannot be imported -> VRAM copy with owned staging%s",
+                                                      (unsigned long)a1, a0, b->_hostReadOnly ? " (read-only host)" : ""); }
                 return b;
             }
             if (s) { nvmtl_swc_free(s); free(s); }
@@ -103,8 +129,10 @@ static void nvbt(const char *tag, int *count, int max);
     }
     memcpy(b->_b.map, a0, a1);
     b->_hostPtr = a0; b->_hostLen = (size_t)a1;
-    { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED %lu bytes at %p (import alignment %zu) \u2014 resynced at every submission",
-                                          (unsigned long)a1, a0, nvmtl_vk_host_import_align()); }
+    b->_hostReadOnly = nvmtl_host_range_readonly(a0, (size_t)a1);
+    { static int said; if (!said++) nvlog("newBufferWithBytesNoCopy: COPIED %lu bytes at %p (import alignment %zu)%s",
+                                          (unsigned long)a1, a0, nvmtl_vk_host_import_align(),
+                                          b->_hostReadOnly ? " \u2014 read-only host range, skipping resync" : " \u2014 resynced at every submission"); }
     return b;
 }
 - (id)newBufferWithDescriptor:(id)a0 { nvlog("newBufferWithDescriptor: -> nil (not built yet)"); return nil; }

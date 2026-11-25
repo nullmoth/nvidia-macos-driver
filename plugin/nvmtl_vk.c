@@ -2082,6 +2082,11 @@ int nvmtl_vk_buffer_import_host(void *ptr, size_t size, nvk_buffer *out)
     if (nvmtl_opaque_CreateBuffer(g_dev, &bci, NULL, &out->buf) != VK_SUCCESS) {
         nvlog("vk: vkCreateBuffer refused an external-memory buffer of %zu bytes", size); out->buf = NULL; return -1; }
     VkMemoryRequirements mr; pvkGetBufferMemoryRequirements(g_dev, (VkBuffer)out->buf, &mr);
+    if (mr.size > size) {
+        nvlog("vk: host-pointer import refused — buffer requires %llu bytes > host range %zu bytes",
+              (unsigned long long)mr.size, size);
+        pvkDestroyBuffer(g_dev, (VkBuffer)out->buf, NULL); out->buf = NULL; return -1;
+    }
     int mt = memtype(mr.memoryTypeBits & mhp.memoryTypeBits,
                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mt < 0) { nvlog("vk: no host-visible memory type is both importable and valid for this buffer");
