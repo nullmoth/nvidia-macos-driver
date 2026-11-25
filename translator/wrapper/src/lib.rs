@@ -913,6 +913,78 @@ pub unsafe extern "C" fn nvmtl_translate_samplers(
     }
 }
 #[cfg(test)]
+mod aliased_buffer_compare_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    fn validate_spv(bytes: &[u8]) {
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let mut opts = spirv_tools::val::ValidatorOptions::default();
+        opts.scalar_block_layout = true;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+            .validate(&words, Some(opts))
+            .expect("SPIR-V must pass spirv-val");
+    }
+
+    #[test]
+    fn softmax_compares_aliased_buffer_bindings() {
+        let ll = r#"
+target triple = "air64_v28-apple-macosx26.7.0"
+
+define void @kernel_soft_max_min(ptr addrspace(1) %src0, ptr addrspace(1) %src2, ptr addrspace(1) %dst, i32 %i02) {
+entry:
+  %conv2 = sext i32 %i02 to i64
+  %cmp.not = icmp eq ptr addrspace(1) %src2, %src0
+  %p2 = bitcast ptr addrspace(1) %src2 to ptr addrspace(1)
+  %cond = select i1 %cmp.not, ptr addrspace(1) null, ptr addrspace(1) %p2
+  %tobool = icmp ne ptr addrspace(1) %cond, null
+  br i1 %tobool, label %has_sink, label %done
+
+has_sink:
+  %arrayidx = getelementptr inbounds float, ptr addrspace(1) %cond, i64 %conv2
+  %v = load float, ptr addrspace(1) %arrayidx, align 4
+  br label %done
+
+done:
+  %out = phi float [ %v, %has_sink ], [ 0.000000e+00, %entry ]
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i64 %conv2
+  store float %out, ptr addrspace(1) %dp, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @kernel_soft_max_min, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src0"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src2"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"dst"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+        let spv = translate_one(ll, Stage::Kernel).expect("translate kernel_soft_max_min");
+        validate_spv(&spv);
+        let lowered = buffer_addresses::lower(&spv).expect("default lower");
+        validate_spv(&lowered);
+        let ubo = table_ubo::convert(&lowered).expect("table_ubo");
+        validate_spv(&ubo);
+
+        let m = rspirv::dr::load_bytes(&spv).unwrap();
+        let has_table = m.annotations.iter().any(|a| matches!(
+            a.operands.as_slice(),
+            [_, rspirv::dr::Operand::Decoration(rspirv::spirv::Decoration::Binding), rspirv::dr::Operand::LiteralBit32(b)]
+                if *b == buffer_addresses::TABLE_BINDING
+        ));
+        assert!(has_table, "distinct buffer param icmp must emit runtime address-table comparison");
+        let has_iequal = m.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions)
+            .any(|i| i.class.opcode == rspirv::spirv::Op::IEqual);
+        assert!(has_iequal, "distinct buffer param icmp must emit OpIEqual");
+    }
+}
+
+#[cfg(test)]
 mod pixel_sampler_checks {
  use super::*;
  use spirv_tools::val::Validator;

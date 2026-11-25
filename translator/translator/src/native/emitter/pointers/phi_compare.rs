@@ -699,11 +699,40 @@ impl Emitter {
             if self.direct_param_values.contains(lhs_name)
                 && self.direct_param_values.contains(rhs_name)
             {
-                let equal = lhs_name == rhs_name;
-                let value = self.const_bool(if is_equal { equal } else { !equal })?;
                 let result_ty = LlType::Bool;
                 let result_type = self.type_id(&result_ty)?;
                 let result = self.result_id(&name, &result_ty)?;
+                if lhs_name == rhs_name {
+                    let value = self.const_bool(is_equal)?;
+                    instructions.push(Self::inst(
+                        Op::CopyObject,
+                        Some(result_type),
+                        Some(result),
+                        vec![Operand::IdRef(value)],
+                    ));
+                    return Ok(());
+                }
+                if self.direct_param_can_compare_address(lhs_name)
+                    && self.direct_param_can_compare_address(rhs_name)
+                {
+                    let equal = self.emit_direct_param_address_equal(
+                        lhs_name,
+                        rhs_name,
+                        instructions,
+                    )?;
+                    instructions.push(Self::inst(
+                        if is_equal {
+                            Op::CopyObject
+                        } else {
+                            Op::LogicalNot
+                        },
+                        Some(result_type),
+                        Some(result),
+                        vec![Operand::IdRef(equal)],
+                    ));
+                    return Ok(());
+                }
+                let value = self.const_bool(!is_equal)?;
                 instructions.push(Self::inst(
                     Op::CopyObject,
                     Some(result_type),
@@ -811,9 +840,54 @@ impl Emitter {
         Ok(())
     }
 
-    /// Equality of two pointers where either one is `select cond, a, b` and every leaf is a distinct-or-identical
-    /// buffer argument. Two different arguments are different allocations, so each leaf pair has a fixed answer
-    /// and the select of pointers becomes a select of those answers under the same condition.
+    fn direct_param_can_compare_address(&self, name: &str) -> bool {
+        self.direct_param_indices.contains_key(name)
+            && self.data_buffer_params.contains(name)
+            && (self.ir.has_kernel_metadata || !self.ir.metadata_data_buffer_params.is_empty())
+    }
+
+    fn emit_direct_param_address_equal(
+        &mut self,
+        lhs_name: &str,
+        rhs_name: &str,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        let (lhs_low, lhs_high) = match self.pointer_payload_words.get(lhs_name).copied() {
+            Some(words) => words,
+            None => self.emit_direct_buffer_address_payload(lhs_name, instructions)?,
+        };
+        let (rhs_low, rhs_high) = match self.pointer_payload_words.get(rhs_name).copied() {
+            Some(words) => words,
+            None => self.emit_direct_buffer_address_payload(rhs_name, instructions)?,
+        };
+        let bool_ty = self.type_id(&LlType::Bool)?;
+        let low_equal = self.fresh();
+        instructions.push(Self::inst(
+            Op::IEqual,
+            Some(bool_ty),
+            Some(low_equal),
+            vec![Operand::IdRef(lhs_low), Operand::IdRef(rhs_low)],
+        ));
+        let high_equal = self.fresh();
+        instructions.push(Self::inst(
+            Op::IEqual,
+            Some(bool_ty),
+            Some(high_equal),
+            vec![Operand::IdRef(lhs_high), Operand::IdRef(rhs_high)],
+        ));
+        let equal = self.fresh();
+        instructions.push(Self::inst(
+            Op::LogicalAnd,
+            Some(bool_ty),
+            Some(equal),
+            vec![Operand::IdRef(low_equal), Operand::IdRef(high_equal)],
+        ));
+        Ok(equal)
+    }
+
+    /// Equality of two pointers where either one is `select cond, a, b` and every leaf is a
+    /// buffer argument. Distinct Metal buffer bindings may alias the same buffer+offset at runtime,
+    /// so leaf comparisons read their 64-bit runtime addresses when stage metadata is present.
     fn selected_pointer_equality(
         &mut self,
         lhs: &LlValue,
@@ -837,7 +911,19 @@ impl Emitter {
                         if self.direct_param_values.contains(a)
                             && self.direct_param_values.contains(b) =>
                     {
-                        Ok(Some(self.const_bool(a == b)?))
+                        if a == b {
+                            Ok(Some(self.const_bool(true)?))
+                        } else if self.direct_param_can_compare_address(a)
+                            && self.direct_param_can_compare_address(b)
+                        {
+                            Ok(Some(self.emit_direct_param_address_equal(
+                                a,
+                                b,
+                                instructions,
+                            )?))
+                        } else {
+                            Ok(Some(self.const_bool(false)?))
+                        }
                     }
                     _ => Ok(None),
                 };
