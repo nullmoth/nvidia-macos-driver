@@ -99,9 +99,13 @@ fn keep_stated_align(scalar: u32, stated: Option<&Operand>) -> u32 {
 }
 
 pub fn lower(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    lower_with_options(bytes, true)
+}
+
+pub fn lower_with_options(bytes: &[u8], keep_data_indexed: bool) -> Result<Vec<u8>, String> {
     match crate::linearize::apply(bytes) {
-        Ok((lin, _why)) => lower_addresses(&lin),
-        Err(_) => lower_addresses(bytes),
+        Ok((lin, _why)) => lower_addresses(&lin, keep_data_indexed),
+        Err(_) => lower_addresses(bytes, keep_data_indexed),
     }
 }
 /// A table the translator declared at TABLE_BINDING that buffer addresses can be read from: a StorageBuffer variable
@@ -132,7 +136,7 @@ fn existing_table(defs: &HashMap<u32, Instruction>, m: &rspirv::dr::Module, tv: 
     }
 }
 
-fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn lower_addresses(bytes: &[u8], keep_data_indexed: bool) -> Result<Vec<u8>, String> {
     let mut m = rspirv::dr::load_bytes(bytes).map_err(|e| e.to_string())?;
     let defs: HashMap<_,_> = m.types_global_values.iter().filter_map(|i| i.result_id.map(|n|(n,i.clone()))).collect();
     let sb_types: HashMap<u32,u32> = defs.iter().filter_map(|(&n,i)| {
@@ -165,7 +169,11 @@ fn lower_addresses(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // bounds-checks with robustBufferAccess; fixed-size blocks still move to addresses.
     let mut value_types = HashMap::new();
     for i in m.all_inst_iter() { if let (Some(n),Some(t)) = (i.result_id,i.result_type) { value_types.insert(n,t); } }
-    let (kept, kept_derived) = kept_roots(&m, &defs, &sb_types, &roots, &value_types);
+    let (kept, kept_derived) = if keep_data_indexed {
+        kept_roots(&m, &defs, &sb_types, &roots, &value_types)
+    } else {
+        (HashSet::new(), HashSet::new())
+    };
     let roots: Vec<(u32,u32,u32)> = roots.into_iter().filter(|r| !kept.contains(&r.0)).collect();
     if roots.is_empty() { return Ok(bytes.to_vec()); }
     for &(n,_,b) in &roots {
@@ -435,5 +443,62 @@ OpFunctionEnd
     }
     #[test] fn rejects_unknown_descriptor_abi() {
         assert!(lower(&source(&FIXTURE.replace("Binding 0","Binding 32"))).unwrap_err().contains("unsupported source buffer"));
+    }
+    #[test] fn data_indexed_runtime_array_keeps_descriptor_by_default_and_lowers_when_forced() {
+        // Models ggml-metal's COPY / GET_ROWS kernel: binding 1 (runtime array) is indexed using
+        // a stride loaded from binding 0 (args). By default kept_roots leaves binding 1 as a
+        // StorageBuffer descriptor (bounds-checked), which cannot accept 4-byte offsets on Vulkan;
+        // forcing full BDA (keep_data_indexed = false, flags & 8) lowers binding 1 through the
+        // address table so any byte offset works in place.
+        let src = r#"
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %args %data
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %uarr ArrayStride 4
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %args DescriptorSet 0
+OpDecorate %args Binding 0
+OpDecorate %data DescriptorSet 0
+OpDecorate %data Binding 1
+%void = OpTypeVoid
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%uarr = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %uarr
+%pb = OpTypePointer StorageBuffer %block
+%pu = OpTypePointer StorageBuffer %uint
+%args = OpVariable %pb StorageBuffer
+%data = OpVariable %pb StorageBuffer
+%fn = OpTypeFunction %void
+%main = OpFunction %void None %fn
+%label = OpLabel
+%idx_p = OpAccessChain %pu %args %zero %zero
+%idx = OpLoad %uint %idx_p
+%src_p = OpAccessChain %pu %data %zero %idx
+%val = OpLoad %uint %src_p
+%dst_p = OpAccessChain %pu %data %zero %one
+OpStore %dst_p %val
+OpReturn
+OpFunctionEnd
+"#;
+        let input = source(src);
+        let default_out = lower(&input).unwrap();
+        validate(&default_out);
+        let m_def = rspirv::dr::load_bytes(&default_out).unwrap();
+        let def_bindings: Vec<u32> = m_def.annotations.iter().filter_map(|a| match a.operands.as_slice() {
+            [_, Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(b)] => Some(*b), _ => None,
+        }).collect();
+        assert!(def_bindings.contains(&1), "default lowering keeps data-indexed binding 1 as SSBO: {def_bindings:?}");
+
+        let forced_out = lower_with_options(&input, false).unwrap();
+        validate(&forced_out);
+        let m_all = rspirv::dr::load_bytes(&forced_out).unwrap();
+        let all_bindings: Vec<u32> = m_all.annotations.iter().filter_map(|a| match a.operands.as_slice() {
+            [_, Operand::Decoration(Decoration::Binding), Operand::LiteralBit32(b)] => Some(*b), _ => None,
+        }).collect();
+        assert_eq!(all_bindings, vec![TABLE_BINDING], "forced full-BDA lowering removes all buffer SSBO descriptors: {all_bindings:?}");
     }
 }

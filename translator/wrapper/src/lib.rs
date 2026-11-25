@@ -842,7 +842,8 @@ pub unsafe extern "C" fn nvmtl_lower_buffer_addresses_ex(
     err: *mut c_char, err_len: usize,
 ) -> i32 {
     if data.is_null() || out.is_null() || out_len.is_null() { return -1; }
-    let r = buffer_addresses::lower(std::slice::from_raw_parts(data,len))
+    let keep_data_indexed = (flags & 8) == 0;
+    let r = buffer_addresses::lower_with_options(std::slice::from_raw_parts(data,len), keep_data_indexed)
         .and_then(|v| if flags & 2 != 0 { table_ubo::convert(&v) } else { Ok(v) })
         .and_then(|v| align_guard::guard(&v, flags & 1 != 0));
     match r {
@@ -860,7 +861,8 @@ pub unsafe extern "C" fn nvmtl_lower_buffer_addresses_g2(
 ) -> i32 {
     if data.is_null() || out.is_null() || out_len.is_null() { return -1; }
     let mut eligible = 0u32;
-    let r = buffer_addresses::lower(std::slice::from_raw_parts(data,len))
+    let keep_data_indexed = (flags & 8) == 0;
+    let r = buffer_addresses::lower_with_options(std::slice::from_raw_parts(data,len), keep_data_indexed)
         .and_then(|v| if flags & 2 != 0 { table_ubo::convert(&v) } else { Ok(v) })
         .and_then(|v| g2_inline::apply(&v, if flags & 4 != 0 { mask } else { 0 }).map(|(v, e)| { eligible = e; v }))
         .and_then(|v| align_guard::guard(&v, flags & 1 != 0));
@@ -1225,5 +1227,74 @@ define internal void @_GLOBAL__sub_I_fc.metal() #3 section "air.static_init" {
         let (on, off) = (translate(&text, Some(1)).expect("boost = true"), translate(&text, Some(0)).expect("boost = false"));
         for m in [&on, &off] { spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2)).validate(m, None).expect("valid"); }
         assert_ne!(on, off, "the two constant values must give two different kernels");
+    }
+}
+
+#[cfg(test)]
+mod ollama_metal_compute_compat_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    fn validate_spv(bytes: &[u8]) {
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let mut opts = spirv_tools::val::ValidatorOptions::default();
+        opts.scalar_block_layout = true;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+            .validate(&words, Some(opts))
+            .expect("SPIR-V must pass spirv-val");
+    }
+
+    #[test]
+    fn nvmtl_lower_buffer_addresses_ex_flag8_forces_full_bda() {
+        let ll = r#"
+target triple = "air64-apple-macosx15.0.0"
+
+define void @kernel_cpy(ptr addrspace(2) %args, ptr addrspace(1) %src, ptr addrspace(1) %dst, i32 %tid) {
+entry:
+  %stride = load i32, ptr addrspace(2) %args, align 4
+  %idx = mul i32 %tid, %stride
+  %idx64 = zext i32 %idx to i64
+  %sp = getelementptr inbounds float, ptr addrspace(1) %src, i64 %idx64
+  %v = load float, ptr addrspace(1) %sp, align 4
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i64 %idx64
+  store float %v, ptr addrspace(1) %dp, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @kernel_cpy, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.buffer_size", i32 4, !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"uint", !"air.arg_name", !"args"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"src"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 4, !"air.arg_type_align_size", i32 4, !"air.arg_type_name", !"float", !"air.arg_name", !"dst"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+        let spv = translate_one(ll, Stage::Kernel).expect("translate kernel_cpy");
+        validate_spv(&spv);
+        let (mut out, mut len) = (std::ptr::null_mut(), 0usize);
+        let mut info = [0u32; 4];
+        let mut err = [0i8; 512];
+        let rc = unsafe {
+            nvmtl_lower_buffer_addresses_ex(
+                spv.as_ptr(), spv.len(), 8 | 1, &mut out, &mut len, info.as_mut_ptr(), err.as_mut_ptr(), err.len(),
+            )
+        };
+        assert_eq!(rc, 0, "flags 8|1 lowering must succeed");
+        let lowered = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+        nvmtl_translate_free(out, len);
+        validate_spv(&lowered);
+        let m = rspirv::dr::load_bytes(&lowered).unwrap();
+        let buffer_bindings: Vec<u32> = m.annotations.iter().filter_map(|a| match a.operands.as_slice() {
+            [_, rspirv::dr::Operand::Decoration(rspirv::spirv::Decoration::Binding), rspirv::dr::Operand::LiteralBit32(b)] if *b < 32 => Some(*b),
+            _ => None,
+        }).collect();
+        assert!(
+            buffer_bindings.is_empty(),
+            "flags 8|1 must lower all data-indexed buffer slots 0..31 to BDA: {buffer_bindings:?}"
+        );
     }
 }
