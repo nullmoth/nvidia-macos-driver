@@ -483,6 +483,30 @@ impl Emitter {
                         }
                     }
                     (self.result_id(name, &have_ty)?, have_ty)
+                } else if !self.selected_pointers.contains_key(name)
+                    && !self.selected_access_trees.contains_key(name)
+                    && !self.selected_load_pointers.contains_key(name)
+                    && self.tir_result_types.contains_key(name)
+                {
+                    let have_ty = self.tir_result_types.get(name).cloned().unwrap();
+                    let want = self.resolve_type(ty)?;
+                    let have = self.resolve_type(&have_ty)?;
+                    if !types_compatible(&have, &want) {
+                        return Err(format!(
+                            "native emitter: SSA value {name} has type {have:?}, used as {want:?}"
+                        ));
+                    }
+                    if let LlType::Ptr(addrspace) = have {
+                        self.pointer_storage
+                            .entry(name.clone())
+                            .or_insert(llvm_pointer_storage(addrspace)?);
+                        if !self.pointer_pointees.contains_key(name) {
+                            if let Some(pointee) = self.tir_use_pointees.get(name).cloned() {
+                                self.pointer_pointees.insert(name.clone(), pointee);
+                            }
+                        }
+                    }
+                    (self.result_id(name, &have_ty)?, have_ty)
                 } else {
                     return Err(format!("native emitter: unknown SSA value {name}"));
                 };
