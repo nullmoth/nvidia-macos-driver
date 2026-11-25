@@ -528,6 +528,219 @@ impl Emitter {
             })
     }
 
+    pub(in crate::native::emitter) fn emit_multi_root_raw_pointer_phi(
+        &mut self,
+        name: &str,
+        incoming: &[(LlValue, String)],
+        result_ty: &LlType,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<bool, String> {
+        let LlType::Ptr(addrspace) = result_ty else {
+            return Ok(false);
+        };
+        if incoming.len() < 2 {
+            return Ok(false);
+        }
+        let mut roots: Vec<(String, u32)> = Vec::new();
+        let mut has_null = false;
+        let mut arm_info: Vec<(Option<(usize, RawBufferOffset)>, &str)> =
+            Vec::with_capacity(incoming.len());
+        for (value, label) in incoming {
+            match value {
+                LlValue::Zero => {
+                    has_null = true;
+                    arm_info.push((None, label.as_str()));
+                }
+                LlValue::Local(incoming_name) => {
+                    let Some(raw) = self.raw_offsets.get(incoming_name).cloned() else {
+                        return Ok(false);
+                    };
+                    if raw.unmodelable || raw.device_addr_base.is_some() {
+                        return Ok(false);
+                    }
+                    let key = (raw.root.clone(), raw.addrspace);
+                    let root_idx = match roots.iter().position(|existing| existing == &key) {
+                        Some(idx) => idx,
+                        None => {
+                            let idx = roots.len();
+                            roots.push(key);
+                            idx
+                        }
+                    };
+                    arm_info.push((Some((root_idx, raw)), label.as_str()));
+                }
+                _ => return Ok(false),
+            }
+        }
+        if roots.len() < 2 {
+            return Ok(false);
+        }
+        let word_indexed = arm_info.iter().all(|(arm, _)| match arm {
+            None => true,
+            Some((_, raw)) => self.raw_pointer_word_aligned(raw),
+        });
+        let index_ty = LlType::Int(32);
+        let index_name = if word_indexed {
+            raw_word_index_name(name)
+        } else {
+            raw_byte_index_name(name)
+        };
+        let mut offset_ops = Vec::new();
+        let mut selector_ops = Vec::new();
+        let mut seen_incoming: HashMap<Word, (Word, Word)> = HashMap::default();
+        let mut pending_edges = Vec::new();
+        let use_bool_selector = roots.len() == 2 && !has_null;
+
+        for ((value, _), (arm, label)) in incoming.iter().zip(arm_info.iter()) {
+            let mut edge_instructions = Vec::new();
+            let (offset_id, sel_id) = match (value, arm) {
+                (LlValue::Zero, None) => {
+                    let off = self.const_uint(0)?;
+                    let tag = self.const_uint(roots.len() as u32)?;
+                    (off, tag)
+                }
+                (LlValue::Local(incoming_name), Some((root_idx, raw))) => {
+                    let incoming_index_name = if word_indexed {
+                        raw_word_index_name(incoming_name)
+                    } else {
+                        raw_byte_index_name(incoming_name)
+                    };
+                    let off = if self.values.contains_key(&incoming_index_name) {
+                        self.value_id(&LlValue::Local(incoming_index_name), &LlType::Int(32))?
+                    } else if word_indexed {
+                        self.emit_raw_word_index(raw, 0, &mut edge_instructions)?
+                    } else {
+                        self.emit_raw_byte_index(raw, 0, &mut edge_instructions)?
+                    };
+                    let tag = if use_bool_selector {
+                        self.const_bool(*root_idx == 0)?
+                    } else {
+                        self.const_uint(*root_idx as u32)?
+                    };
+                    (off, tag)
+                }
+                _ => return Ok(false),
+            };
+            let label_id = self.label_id(label)?;
+            pending_edges.push((label_id, edge_instructions));
+            if let Some(existing) = seen_incoming.insert(label_id, (offset_id, sel_id)) {
+                if existing != (offset_id, sel_id) {
+                    return Err(format!(
+                        "native emitter: multi-root raw pointer phi has multiple values from predecessor {label}"
+                    ));
+                }
+                continue;
+            }
+            offset_ops.push(Operand::IdRef(offset_id));
+            offset_ops.push(Operand::IdRef(label_id));
+            selector_ops.push(Operand::IdRef(sel_id));
+            selector_ops.push(Operand::IdRef(label_id));
+        }
+
+        let offset_result = self.result_id(&index_name, &index_ty)?;
+        let offset_type = self.type_id(&index_ty)?;
+        let selector_result = self.fresh();
+        let selector_type = if use_bool_selector {
+            self.type_id(&LlType::Bool)?
+        } else {
+            offset_type
+        };
+        for (predecessor, edge_instructions) in pending_edges {
+            self.record_phi_edge_instructions(predecessor, edge_instructions);
+        }
+        instructions.push(Self::inst(
+            Op::Phi,
+            Some(offset_type),
+            Some(offset_result),
+            offset_ops,
+        ));
+        instructions.push(Self::inst(
+            Op::Phi,
+            Some(selector_type),
+            Some(selector_result),
+            selector_ops,
+        ));
+
+        let scale = if word_indexed { 4 } else { 1 };
+        let make_raw = |root: &str, root_addrspace: u32| RawBufferOffset {
+            const_off: 0,
+            dyn_terms: vec![(
+                TypedValue {
+                    ty: index_ty.clone(),
+                    value: LlValue::Local(index_name.clone()),
+                },
+                scale,
+            )],
+            root: root.to_string(),
+            addrspace: root_addrspace,
+            unmodelable: false,
+            device_addr_base: None,
+        };
+        let pointee = self
+            .tir_use_pointees
+            .get(name)
+            .cloned()
+            .unwrap_or(LlType::Int(8));
+        let tree = if use_bool_selector {
+            SelectedAccessTree {
+                cond: selector_result,
+                true_arm: SelectedAccessArm::Raw(make_raw(&roots[0].0, roots[0].1)),
+                false_arm: SelectedAccessArm::Raw(make_raw(&roots[1].0, roots[1].1)),
+                pointee: pointee.clone(),
+            }
+        } else {
+            let bool_ty = self.type_id(&LlType::Bool)?;
+            let mut tail = if has_null {
+                SelectedAccessArm::Null
+            } else {
+                let last = roots.last().expect("at least two roots");
+                SelectedAccessArm::Raw(make_raw(&last.0, last.1))
+            };
+            let split_count = if has_null {
+                roots.len()
+            } else {
+                roots.len() - 1
+            };
+            for idx in (0..split_count).rev() {
+                let tag_const = self.const_uint(idx as u32)?;
+                let cond = self.fresh();
+                self.phi_result_instructions.push(Self::inst(
+                    Op::IEqual,
+                    Some(bool_ty),
+                    Some(cond),
+                    vec![Operand::IdRef(selector_result), Operand::IdRef(tag_const)],
+                ));
+                let node = SelectedAccessTree {
+                    cond,
+                    true_arm: SelectedAccessArm::Raw(make_raw(&roots[idx].0, roots[idx].1)),
+                    false_arm: tail,
+                    pointee: pointee.clone(),
+                };
+                if idx == 0 {
+                    tail = SelectedAccessArm::Nested(Box::new(node));
+                } else {
+                    tail = SelectedAccessArm::Nested(Box::new(node));
+                }
+            }
+            match tail {
+                SelectedAccessArm::Nested(tree) => *tree,
+                _ => unreachable!("split_count >= 2 guarantees nested tree"),
+            }
+        };
+
+        if has_null {
+            self.emit_pointer_nullness_phi(name, incoming, result_ty, instructions)?;
+        } else {
+            let is_null = self.const_bool(false)?;
+            self.record_pointer_nullness(name.to_string(), is_null);
+        }
+        self.pointer_storage
+            .insert(name.to_string(), llvm_pointer_storage(*addrspace)?);
+        self.pointer_pointees.insert(name.to_string(), pointee);
+        self.selected_access_trees.insert(name.to_string(), tree);
+        Ok(true)
+    }
+
     pub(in crate::native::emitter) fn emit_raw_pointer_phi(
         &mut self,
         name: &str,

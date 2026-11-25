@@ -17,7 +17,60 @@ impl Emitter {
             ));
         }
         let cond_id = self.value_id_in(&cond.value, &cond.ty, instructions)?;
-        if let LlType::Ptr(_) = result_ty {
+        if let LlType::Ptr(addrspace) = result_ty {
+            let tree_arm_for = |emitter: &Self, value: &LlValue| -> Option<SelectedAccessArm> {
+                match value {
+                    LlValue::Zero => Some(SelectedAccessArm::Null),
+                    LlValue::Local(local) => {
+                        if let Some(tree) = emitter.selected_access_trees.get(local).cloned() {
+                            return Some(SelectedAccessArm::Nested(Box::new(tree)));
+                        }
+                        if let Some(raw) = emitter.raw_offsets.get(local).cloned() {
+                            if !raw.unmodelable
+                                && !(emitter.bda_device_pointers && raw.device_addr_base.is_some())
+                            {
+                                return Some(SelectedAccessArm::Raw(raw));
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                }
+            };
+            let has_tree_arm = matches!(&true_value.value, LlValue::Local(l) if self.selected_access_trees.contains_key(l))
+                || matches!(&false_value.value, LlValue::Local(l) if self.selected_access_trees.contains_key(l));
+            let has_nullable_raw_arm = matches!(
+                (&true_value.value, &false_value.value),
+                (LlValue::Zero, LlValue::Local(l)) | (LlValue::Local(l), LlValue::Zero)
+                    if self.raw_offsets.get(l).is_some_and(|raw| !raw.unmodelable && !(self.bda_device_pointers && raw.device_addr_base.is_some()))
+            );
+            if (has_tree_arm || has_nullable_raw_arm)
+                && !self.pointer_phi_incoming_values.contains(&name)
+            {
+                if let (Some(true_arm), Some(false_arm)) = (
+                    tree_arm_for(self, &true_value.value),
+                    tree_arm_for(self, &false_value.value),
+                ) {
+                    let pointee = self
+                        .tir_use_pointees
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or(LlType::Int(8));
+                    let tree = SelectedAccessTree {
+                        cond: cond_id,
+                        true_arm,
+                        false_arm,
+                        pointee: pointee.clone(),
+                    };
+                    let is_null = self.selected_access_tree_nullness_id(&tree, instructions)?;
+                    self.record_pointer_nullness(name.clone(), is_null);
+                    self.pointer_storage
+                        .insert(name.clone(), llvm_pointer_storage(addrspace)?);
+                    self.pointer_pointees.insert(name.clone(), pointee);
+                    self.selected_access_trees.insert(name, tree);
+                    return Ok(());
+                }
+            }
             let arm_is_deferred = |value: &LlValue| {
                 matches!(value, LlValue::Local(local)
                     if self.selected_pointers.contains_key(local)

@@ -1,6 +1,45 @@
 use super::*;
 
 impl Emitter {
+    pub(in crate::native::emitter) fn selected_access_tree_nullness_id(
+        &mut self,
+        tree: &SelectedAccessTree,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        let true_null = self.selected_access_arm_nullness_id(&tree.true_arm, instructions)?;
+        let false_null = self.selected_access_arm_nullness_id(&tree.false_arm, instructions)?;
+        if true_null == false_null {
+            return Ok(true_null);
+        }
+        let bool_ty = self.type_id(&LlType::Bool)?;
+        let result = self.fresh();
+        instructions.push(Self::inst(
+            Op::Select,
+            Some(bool_ty),
+            Some(result),
+            vec![
+                Operand::IdRef(tree.cond),
+                Operand::IdRef(true_null),
+                Operand::IdRef(false_null),
+            ],
+        ));
+        Ok(result)
+    }
+
+    fn selected_access_arm_nullness_id(
+        &mut self,
+        arm: &SelectedAccessArm,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        match arm {
+            SelectedAccessArm::Null => self.const_bool(true),
+            SelectedAccessArm::Raw(_) | SelectedAccessArm::Typed { .. } => self.const_bool(false),
+            SelectedAccessArm::Nested(nested) => {
+                self.selected_access_tree_nullness_id(nested, instructions)
+            }
+        }
+    }
+
     pub(in crate::native::emitter) fn emit_mtl_force_not_checked_load_call(
         &mut self,
         call: &LlCall,

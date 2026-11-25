@@ -24,6 +24,9 @@ impl Emitter {
         if self.emit_bda_address_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }
+        if self.emit_multi_root_raw_pointer_phi(&name, &incoming, &result_ty, instructions)? {
+            return Ok(());
+        }
         if self.emit_raw_pointer_phi(&name, &incoming, &result_ty, instructions)? {
             return Ok(());
         }
