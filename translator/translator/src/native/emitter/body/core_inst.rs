@@ -538,6 +538,12 @@ impl Emitter {
         self.inline_parameter_substitutions
             .push((placeholder_id, argument_id));
         self.direct_param_values.insert(name.to_string());
+        if let LlValue::Local(source) = &argument.value {
+            if let Some(&param_index) = self.direct_param_indices.get(source) {
+                self.direct_param_indices
+                    .insert(name.to_string(), param_index);
+            }
+        }
         self.param_values.insert(name.to_string());
         if self.bda_device_pointers {
             if let LlValue::Local(source) = &argument.value {
@@ -1618,36 +1624,21 @@ impl Emitter {
         if let Some(pointee) = self.pointer_pointee_for_value(&ptr.value)? {
             let pointee = self.resolve_type(&pointee)?;
             let object_ty = self.resolve_type(&object.ty)?;
-            if self.bda_device_pointers && pointee == LlType::Int(64) && object_ty == LlType::Ptr(1)
+            if self.bda_device_pointers
+                && pointee == LlType::Int(64)
+                && matches!(object_ty, LlType::Ptr(1 | 2))
             {
-                if let LlValue::Local(object_name) = &object.value {
-                    let address = if let Some(address) =
-                        self.bda_direct_addresses.get(object_name).copied()
-                    {
-                        Some(address)
-                    } else if let Some(raw) = self.raw_offsets.get(object_name).cloned() {
-                        raw.device_addr_base
-                            .map(|_| self.materialize_device_address(&raw, instructions))
-                            .transpose()?
-                    } else if self.direct_param_indices.contains_key(object_name) {
-                        let (low, high) =
-                            self.emit_direct_buffer_address_payload(object_name, instructions)?;
-                        self.pointer_payload_words
-                            .insert(object_name.clone(), (low, high));
-                        Some(self.combine_pointer_payload_words(low, high, instructions)?)
-                    } else {
-                        None
-                    };
-                    if let Some(address) = address {
-                        let pointer = self.value_id_in(&ptr.value, &ptr.ty, instructions)?;
-                        instructions.push(Self::inst(
-                            Op::Store,
-                            None,
-                            None,
-                            vec![Operand::IdRef(pointer), Operand::IdRef(address)],
-                        ));
-                        return Ok(());
-                    }
+                if let Some(address) =
+                    self.materialize_bda_pointer_address(&object.value, instructions)?
+                {
+                    let pointer = self.value_id_in(&ptr.value, &ptr.ty, instructions)?;
+                    instructions.push(Self::inst(
+                        Op::Store,
+                        None,
+                        None,
+                        vec![Operand::IdRef(pointer), Operand::IdRef(address)],
+                    ));
+                    return Ok(());
                 }
             }
             if self.emit_mismatched_store(

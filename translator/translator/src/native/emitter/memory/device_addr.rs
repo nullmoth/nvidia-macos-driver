@@ -225,14 +225,104 @@ impl Emitter {
         Ok(())
     }
 
+    pub(in crate::native::emitter) fn can_materialize_bda_pointer_address(
+        &self,
+        value: &LlValue,
+    ) -> bool {
+        if !self.bda_device_pointers {
+            return false;
+        }
+        match value {
+            LlValue::Zero | LlValue::Undef => true,
+            LlValue::Local(name) => {
+                self.bda_direct_addresses.contains_key(name)
+                    || self.direct_param_indices.contains_key(name)
+                    || (self.values.contains_key(name)
+                        && self.pointer_storage.get(name)
+                            == Some(&StorageClass::PhysicalStorageBuffer))
+                    || self.raw_offsets.get(name).is_some_and(|raw| {
+                        !raw.unmodelable
+                            && (raw.device_addr_base.is_some()
+                                || self.bda_direct_addresses.contains_key(&raw.root)
+                                || self.direct_param_indices.contains_key(&raw.root))
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    pub(in crate::native::emitter) fn materialize_bda_pointer_address(
+        &mut self,
+        value: &LlValue,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Option<Word>, String> {
+        if !self.bda_device_pointers {
+            return Ok(None);
+        }
+        match value {
+            LlValue::Zero | LlValue::Undef => Ok(Some(self.const_signed_int(64, 0)?)),
+            LlValue::Local(name) => {
+                if let Some(raw) = self.raw_offsets.get(name).cloned() {
+                    if !raw.unmodelable
+                        && (raw.device_addr_base.is_some()
+                            || self.bda_direct_addresses.contains_key(&raw.root)
+                            || self.direct_param_indices.contains_key(&raw.root))
+                    {
+                        if raw.const_off == 0 && raw.dyn_terms.is_empty() {
+                            if let Some(addr) = self.bda_direct_addresses.get(name).copied() {
+                                return Ok(Some(addr));
+                            }
+                        }
+                        self.used_device_address = true;
+                        return Ok(Some(self.materialize_device_address(&raw, instructions)?));
+                    }
+                }
+                if let Some(addr) = self.bda_direct_addresses.get(name).copied() {
+                    self.used_device_address = true;
+                    return Ok(Some(addr));
+                }
+                if self.direct_param_indices.contains_key(name) {
+                    let (low, high) = self.emit_direct_buffer_address_payload(name, instructions)?;
+                    self.used_device_address = true;
+                    return Ok(Some(
+                        self.combine_pointer_payload_words(low, high, instructions)?,
+                    ));
+                }
+                if self.pointer_storage.get(name) == Some(&StorageClass::PhysicalStorageBuffer) {
+                    if let Some(ptr_id) = self.values.get(name).map(|(id, _)| *id) {
+                        let i64_ty = self.type_id(&LlType::Int(64))?;
+                        let addr = self.fresh();
+                        instructions.push(Self::inst(
+                            Op::ConvertPtrToU,
+                            Some(i64_ty),
+                            Some(addr),
+                            vec![Operand::IdRef(ptr_id)],
+                        ));
+                        self.used_device_address = true;
+                        return Ok(Some(addr));
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     pub(in crate::native::emitter) fn materialize_device_address(
         &mut self,
         raw: &RawBufferOffset,
         instructions: &mut Vec<Instruction>,
     ) -> Result<Word, String> {
-        let base = raw
-            .device_addr_base
-            .ok_or("native emitter: device address offset has no base")?;
+        let base = if let Some(base) = raw.device_addr_base {
+            base
+        } else if let Some(base) = self.bda_direct_addresses.get(&raw.root).copied() {
+            base
+        } else if self.direct_param_indices.contains_key(&raw.root) {
+            let (low, high) = self.emit_direct_buffer_address_payload(&raw.root, instructions)?;
+            self.combine_pointer_payload_words(low, high, instructions)?
+        } else {
+            return Err("native emitter: device address offset has no base".to_string());
+        };
         let i64_ty = self.type_id(&LlType::Int(64))?;
         let mut addr = base;
         if raw.const_off != 0 {

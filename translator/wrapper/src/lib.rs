@@ -1052,6 +1052,136 @@ declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1), ptr a
 }
 
 #[cfg(test)]
+mod dynamic_local_device_pointer_tests {
+    use super::*;
+    use spirv_tools::val::Validator;
+
+    fn validate_spv(bytes: &[u8]) {
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let mut opts = spirv_tools::val::ValidatorOptions::default();
+        opts.scalar_block_layout = true;
+        spirv_tools::val::create(Some(spirv_tools::TargetEnv::Vulkan_1_2))
+            .validate(&words, Some(opts))
+            .expect("SPIR-V must pass spirv-val");
+    }
+
+    #[test]
+    fn dynamic_local_device_pointer_array_stores_and_loads_via_bda() {
+        let ll = r#"
+target triple = "air64_v28-apple-macosx26.7.0"
+%struct.Args = type { i32, [8 x i64] }
+
+define void @kernel_bin_fuse_min(ptr addrspace(2) %args, ptr addrspace(1) %src0, ptr addrspace(1) %src1, ptr addrspace(1) %dst, i32 %tid) {
+entry:
+  %ptrs = alloca [8 x ptr addrspace(1)], align 8
+  %n_ptr = getelementptr inbounds %struct.Args, ptr addrspace(2) %args, i64 0, i32 0
+  %n = load i32, ptr addrspace(2) %n_ptr, align 4
+  br label %store_loop
+
+store_loop:
+  %j = phi i32 [ 0, %entry ], [ %j.next, %store_loop ]
+  %j64 = zext i32 %j to i64
+  %off_ptr = getelementptr inbounds %struct.Args, ptr addrspace(2) %args, i64 0, i32 1, i64 %j64
+  %off = load i64, ptr addrspace(2) %off_ptr, align 8
+  %base = getelementptr inbounds i8, ptr addrspace(1) %src1, i64 %off
+  %slot = getelementptr inbounds [8 x ptr addrspace(1)], ptr %ptrs, i64 0, i64 %j64
+  %slot_bc = bitcast ptr %slot to ptr
+  store ptr addrspace(1) %base, ptr %slot_bc, align 8
+  %j.next = add i32 %j, 1
+  %more1 = icmp slt i32 %j.next, %n
+  br i1 %more1, label %store_loop, label %load_pre
+
+load_pre:
+  %tid64 = zext i32 %tid to i64
+  %p0 = getelementptr inbounds float, ptr addrspace(1) %src0, i64 %tid64
+  %init = load float, ptr addrspace(1) %p0, align 4
+  br label %load_loop
+
+load_loop:
+  %k = phi i32 [ 0, %load_pre ], [ %k.next, %load_loop ]
+  %acc = phi float [ %init, %load_pre ], [ %sum, %load_loop ]
+  %k64 = zext i32 %k to i64
+  %lslot = getelementptr inbounds [8 x ptr addrspace(1)], ptr %ptrs, i64 0, i64 %k64
+  %loaded_ptr = load ptr addrspace(1), ptr %lslot, align 8
+  %elem_ptr = getelementptr inbounds float, ptr addrspace(1) %loaded_ptr, i64 %tid64
+  %val = load float, ptr addrspace(1) %elem_ptr, align 4
+  %sum = fadd float %acc, %val
+  %k.next = add i32 %k, 1
+  %more2 = icmp slt i32 %k.next, %n
+  br i1 %more2, label %load_loop, label %done
+
+done:
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i64 %tid64
+  store float %sum, ptr addrspace(1) %dp, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @kernel_bin_fuse_min, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6, !7}
+!3 = !{i32 0, !"air.buffer", !"air.buffer_size", i32 72, !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 2, !"air.arg_type_size", i32 72, !"air.arg_type_align_size", i32 8, !"air.arg_type_name", !"Args", !"air.arg_name", !"args"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src0"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src1"}
+!6 = !{i32 3, !"air.buffer", !"air.location_index", i32 3, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"dst"}
+!7 = !{i32 4, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+        let spv = translate_one(ll, Stage::Kernel).expect("translate kernel_bin_fuse_min");
+        validate_spv(&spv);
+        let lowered = buffer_addresses::lower(&spv).expect("default lower");
+        validate_spv(&lowered);
+        let ubo = table_ubo::convert(&lowered).expect("table_ubo");
+        validate_spv(&ubo);
+
+        let m = rspirv::dr::load_bytes(&spv).unwrap();
+        let has_u2p = m.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions)
+            .any(|i| i.class.opcode == rspirv::spirv::Op::ConvertUToPtr);
+        assert!(has_u2p, "dynamic local device-pointer array must lower loads through ConvertUToPtr, not zero");
+    }
+
+    #[test]
+    fn selected_device_pointer_stored_in_local_array_translates_and_validates() {
+        let ll = r#"
+target triple = "air64_v28-apple-macosx26.7.0"
+
+define void @kernel_mul_mv_ext_min(ptr addrspace(1) %src1, ptr addrspace(1) %dst, i32 %tid) {
+entry:
+  %y4 = alloca [2 x ptr addrspace(1)], align 8
+  %tid64 = zext i32 %tid to i64
+  %cmp = icmp ult i32 %tid, 16
+  %p1 = getelementptr inbounds <4 x float>, ptr addrspace(1) %src1, i64 %tid64
+  %p0 = bitcast ptr addrspace(1) %src1 to ptr addrspace(1)
+  %cond59 = select i1 %cmp, ptr addrspace(1) %p1, ptr addrspace(1) %p0
+  %s0 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %y4, i64 0, i64 0
+  store ptr addrspace(1) %cond59, ptr %s0, align 8
+  %loaded = load ptr addrspace(1), ptr %s0, align 8
+  %v = load <4 x float>, ptr addrspace(1) %loaded, align 16
+  %dp = getelementptr inbounds <4 x float>, ptr addrspace(1) %dst, i64 %tid64
+  store <4 x float> %v, ptr addrspace(1) %dp, align 16
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @kernel_mul_mv_ext_min, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src1"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"dst"}
+!5 = !{i32 2, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+        let spv = translate_one(ll, Stage::Kernel).expect("translate kernel_mul_mv_ext_min");
+        validate_spv(&spv);
+        let lowered = buffer_addresses::lower(&spv).expect("default lower");
+        validate_spv(&lowered);
+        let ubo = table_ubo::convert(&lowered).expect("table_ubo");
+        validate_spv(&ubo);
+    }
+}
+
+#[cfg(test)]
 mod stage_in_tests {
     use super::*;
 

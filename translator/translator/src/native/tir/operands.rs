@@ -579,7 +579,15 @@ fn first_type_from(toks: &[&str], candidate: &mut String) -> Option<LlType> {
             }
             candidate.push_str(tok);
         }
-        if let Ok(ty) = parse_type(candidate.trim_end_matches(',')) {
+        let trimmed = candidate.trim_end_matches(',');
+        if trimmed == "ptr"
+            && toks
+                .get(end)
+                .is_some_and(|next| next.starts_with("addrspace("))
+        {
+            continue;
+        }
+        if let Ok(ty) = parse_type(trimmed) {
             return Some(ty);
         }
     }

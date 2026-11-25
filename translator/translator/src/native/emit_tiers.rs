@@ -510,6 +510,75 @@ pub(super) fn requires_device_address_model(parsed: &LlModule) -> bool {
     }
 
     for function in &parsed.functions {
+        let mut local_ptr_gep_dynamic = HashSet::<String>::default();
+        let mut local_ptr_select_or_phi = HashSet::<String>::default();
+        for inst in function.carrier_insts() {
+            let Some(result) = inst.result.as_ref() else {
+                continue;
+            };
+            if let Some(gep) = inst.gep().as_deref() {
+                if matches!(gep.base.ty, LlType::Ptr(0))
+                    && gep.indices.iter().any(|idx| !is_constant_index(&idx.value))
+                {
+                    local_ptr_gep_dynamic.insert(result.clone());
+                }
+            }
+            if matches!(inst.result_ty.as_ref(), Some(LlType::Ptr(1 | 2)))
+                && matches!(inst.opcode.as_str(), "select" | "phi")
+            {
+                local_ptr_select_or_phi.insert(result.clone());
+            }
+        }
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for inst in function.carrier_insts() {
+                let Some(result) = inst.result.as_ref() else {
+                    continue;
+                };
+                if !local_ptr_gep_dynamic.contains(result)
+                    && inst
+                        .identity_ptr_bitcast()
+                        .is_some_and(|(_, base)| local_ptr_gep_dynamic.contains(base))
+                {
+                    local_ptr_gep_dynamic.insert(result.clone());
+                    changed = true;
+                }
+                if local_ptr_select_or_phi.contains(result)
+                    || !matches!(inst.result_ty.as_ref(), Some(LlType::Ptr(1 | 2)))
+                {
+                    continue;
+                }
+                let derived = inst.gep().as_deref().is_some_and(|gep| {
+                    local_is(&gep.base.value, &local_ptr_select_or_phi)
+                }) || inst
+                    .identity_ptr_bitcast()
+                    .is_some_and(|(_, base)| local_ptr_select_or_phi.contains(base));
+                if derived {
+                    local_ptr_select_or_phi.insert(result.clone());
+                    changed = true;
+                }
+            }
+        }
+        let loads_local_device_ptr = function.carrier_insts().any(|inst| {
+            inst.load().as_deref().is_some_and(|load| {
+                matches!(load.result_ty, LlType::Ptr(1 | 2))
+                    && matches!(load.ptr.ty, LlType::Ptr(0))
+            })
+        });
+        if loads_local_device_ptr
+            && function.carrier_insts().any(|inst| {
+                inst.store().as_deref().is_some_and(|(value, pointer)| {
+                    matches!(value.ty, LlType::Ptr(1 | 2))
+                        && matches!(pointer.ty, LlType::Ptr(0))
+                        && (local_is(&pointer.value, &local_ptr_gep_dynamic)
+                            || local_is(&value.value, &local_ptr_select_or_phi))
+                })
+            })
+        {
+            return true;
+        }
+
         let generic_device_address_bases = function
             .carrier_insts()
             .filter_map(|inst| inst.gep().as_deref())

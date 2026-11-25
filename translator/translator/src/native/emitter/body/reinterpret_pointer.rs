@@ -244,25 +244,24 @@ impl Emitter {
 
         let ptr_id = self.value_id(&ptr.value, &ptr.ty)?;
         if self.bda_device_pointers && *pointee == LlType::Int(64) {
-            if let LlValue::Local(object_name) = &object.value {
-                if let Some(address) = self.bda_direct_addresses.get(object_name).copied() {
-                    self.emit_sidecar.local_pointer_field_stores.push(
-                        crate::emit_sidecar::LocalPointerFieldStore {
-                            id: address,
-                            source: address,
-                            root: key.root,
-                            indices: key.indices.clone(),
-                        },
-                    );
-                    instructions.push(Self::inst(
-                        Op::Store,
-                        None,
-                        None,
-                        vec![Operand::IdRef(ptr_id), Operand::IdRef(address)],
-                    ));
-                    self.local_pointer_fields.insert(key, object.clone());
-                    return Ok(true);
-                }
+            if let Some(address) = self.materialize_bda_pointer_address(&object.value, instructions)?
+            {
+                self.emit_sidecar.local_pointer_field_stores.push(
+                    crate::emit_sidecar::LocalPointerFieldStore {
+                        id: address,
+                        source: address,
+                        root: key.root,
+                        indices: key.indices.clone(),
+                    },
+                );
+                instructions.push(Self::inst(
+                    Op::Store,
+                    None,
+                    None,
+                    vec![Operand::IdRef(ptr_id), Operand::IdRef(address)],
+                ));
+                self.local_pointer_fields.insert(key, object.clone());
+                return Ok(true);
             }
         }
         let zero_ty = self.type_id(&LlType::Int(64))?;
@@ -567,6 +566,17 @@ impl Emitter {
                 suffix: suffix.clone(),
             };
             if values.is_empty() {
+                if self.bda_forwards_local_pointer_field(result_name, result_ty)
+                    && self
+                        .pointer_pointee_for_value(&ptr.value)?
+                        .map(|ty| self.resolve_type(&ty))
+                        .transpose()?
+                        == Some(LlType::Int(64))
+                {
+                    let pointer = self.value_id_in(&ptr.value, &ptr.ty, instructions)?;
+                    self.emit_bda_address_from_field(result_name, pointer, instructions)?;
+                    return Ok(true);
+                }
                 let LlType::Ptr(addrspace) = result_ty else {
                     return Ok(false);
                 };
