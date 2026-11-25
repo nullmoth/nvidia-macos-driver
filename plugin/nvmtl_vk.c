@@ -4513,6 +4513,7 @@ static VkDescriptorSet nvmtl_snapshot_set_c(nvk_cmdbuf *c, uint32_t which, const
         VkDescriptorBufferInfo ai;
         if (covered && samePage && !c->icb_slot && (!table || !nvmtl_address_snapshot(c, which, &ai))) {
             if (table) t->lastdyn[which] = (uint32_t)ai.offset;
+            t->lastw[which][0] &= ~(t->chg[which][0] & 0xffffffffull);
             t->dirty[which] = 0; memset(t->chg[which], 0, sizeof t->chg[which]);
             c->dyn_out[which] = t->lastdyn[which]; c->tab_out[which] = t->lasttab[which];
             nvmtl_enc78_count(E78C_SETREUSE, 1);
