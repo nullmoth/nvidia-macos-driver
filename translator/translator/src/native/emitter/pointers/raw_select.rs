@@ -785,6 +785,51 @@ impl Emitter {
         let LlType::Ptr(addrspace) = result_ty else {
             return Ok(false);
         };
+        let is_emitted_psb_pointer = |value: &LlValue| {
+            matches!(
+                value,
+                LlValue::Local(local)
+                    if self.values.contains_key(local)
+                        && self.pointer_storage.get(local)
+                            == Some(&StorageClass::PhysicalStorageBuffer)
+            )
+        };
+        if self.bda_device_pointers
+            && matches!(*addrspace, 1 | 2)
+            && !(is_emitted_psb_pointer(true_value) && is_emitted_psb_pointer(false_value))
+            && self.can_materialize_bda_pointer_address(true_value)
+            && self.can_materialize_bda_pointer_address(false_value)
+        {
+            if let (Some(true_addr), Some(false_addr)) = (
+                self.materialize_bda_pointer_address(true_value, instructions)?,
+                self.materialize_bda_pointer_address(false_value, instructions)?,
+            ) {
+                let i64_ty = self.type_id(&LlType::Int(64))?;
+                let address = self.result_id(&bda_address_name(name), &LlType::Int(64))?;
+                instructions.push(Self::inst(
+                    Op::Select,
+                    Some(i64_ty),
+                    Some(address),
+                    vec![
+                        Operand::IdRef(cond_id),
+                        Operand::IdRef(true_addr),
+                        Operand::IdRef(false_addr),
+                    ],
+                ));
+                self.bda_address_values.insert(address);
+                self.bda_direct_addresses.insert(name.to_string(), address);
+                let mut raw = RawBufferOffset::root(format!(".bda_{address}"), *addrspace);
+                raw.device_addr_base = Some(address);
+                self.raw_offsets.insert(name.to_string(), raw);
+                self.pointer_storage
+                    .insert(name.to_string(), StorageClass::PhysicalStorageBuffer);
+                self.pointer_pointees
+                    .insert(name.to_string(), LlType::Int(8));
+                self.emit_device_address_nullness(name, address, instructions)?;
+                self.used_device_address = true;
+                return Ok(true);
+            }
+        }
         let (LlValue::Local(true_name), LlValue::Local(false_name)) = (true_value, false_value)
         else {
             return Ok(false);
