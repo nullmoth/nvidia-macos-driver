@@ -91,6 +91,14 @@ fn keep_on_storage_buffer(m: &mut rspirv::dr::Module, seeds: &[u32], sb_types: &
         inst(Op::TypePointer, None, Some(n), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(sb_types[&t])]))).collect();
     places.sort_by(|a, b| b.0.cmp(&a.0));
     for (pos, t) in places { m.types_global_values.insert(pos, t); }
+    let extra_ann: Vec<Instruction> = m.annotations.iter().filter_map(|a| {
+        if !matches!(a.class.opcode, Op::Decorate | Op::DecorateId) { return None; }
+        let &n = a.operands.first().and_then(id).and_then(|t| dup.get(&t))?;
+        let mut ops = a.operands.clone();
+        ops[0] = Operand::IdRef(n);
+        Some(inst(a.class.opcode, None, None, ops))
+    }).collect();
+    m.annotations.extend(extra_ann);
 }
 
 fn keep_stated_align(scalar: u32, stated: Option<&Operand>) -> u32 {
