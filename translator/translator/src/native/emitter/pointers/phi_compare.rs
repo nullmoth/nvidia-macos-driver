@@ -782,7 +782,7 @@ impl Emitter {
         }
         let nullness = match (&lhs.value, &rhs.value) {
             (LlValue::Zero, value) | (value, LlValue::Zero) => {
-                self.pointer_nullness_for_compare(value)?
+                self.resolve_pointer_nullness_id(value, instructions, false)?
             }
             _ => {
                 return Err(format!(

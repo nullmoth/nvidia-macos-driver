@@ -701,19 +701,6 @@ impl Emitter {
         }
     }
 
-    pub(in crate::native::emitter) fn pointer_nullness_for_compare(
-        &self,
-        value: &LlValue,
-    ) -> Result<Word, String> {
-        match value {
-            LlValue::Zero => Err("native emitter: degenerate null pointer comparison".to_string()),
-            LlValue::Local(name) => self.pointer_nullness.get(name).copied().ok_or_else(|| {
-                format!("native emitter: pointer nullness is not tracked for {name}")
-            }),
-            _ => Err("native emitter: pointer nullness comparison requires SSA value".to_string()),
-        }
-    }
-
     pub(in crate::native::emitter) fn label_id(&self, label: &str) -> Result<Word, String> {
         self.block_labels
             .get(label)

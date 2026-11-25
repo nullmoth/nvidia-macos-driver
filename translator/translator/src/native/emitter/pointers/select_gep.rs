@@ -196,7 +196,7 @@ impl Emitter {
         );
         self.pointer_storage.insert(name.to_string(), storage);
         self.pointer_pointees.insert(name.to_string(), pointee);
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -478,7 +478,7 @@ impl Emitter {
                     .insert(name.to_string(), selected.true_storage);
             }
             self.pointer_pointees.insert(name.to_string(), pointee);
-            if !self.pointer_phi_values.is_empty() {
+            if self.tracks_pointer_nullness() {
                 let is_null = self.const_bool(false)?;
                 self.record_pointer_nullness(name.to_string(), is_null);
             }
@@ -562,7 +562,7 @@ impl Emitter {
         self.pointer_pointees
             .insert(name.to_string(), pointee.clone());
         self.unmodeled_pointers.insert(name.to_string());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }

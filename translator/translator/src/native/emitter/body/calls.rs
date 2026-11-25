@@ -1,6 +1,45 @@
 use super::*;
 
 impl Emitter {
+    pub(in crate::native::emitter) fn selected_access_tree_nullness_id(
+        &mut self,
+        tree: &SelectedAccessTree,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        let true_null = self.selected_access_arm_nullness_id(&tree.true_arm, instructions)?;
+        let false_null = self.selected_access_arm_nullness_id(&tree.false_arm, instructions)?;
+        if true_null == false_null {
+            return Ok(true_null);
+        }
+        let bool_ty = self.type_id(&LlType::Bool)?;
+        let result = self.fresh();
+        instructions.push(Self::inst(
+            Op::Select,
+            Some(bool_ty),
+            Some(result),
+            vec![
+                Operand::IdRef(tree.cond),
+                Operand::IdRef(true_null),
+                Operand::IdRef(false_null),
+            ],
+        ));
+        Ok(result)
+    }
+
+    fn selected_access_arm_nullness_id(
+        &mut self,
+        arm: &SelectedAccessArm,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        match arm {
+            SelectedAccessArm::Null => self.const_bool(true),
+            SelectedAccessArm::Raw(_) | SelectedAccessArm::Typed { .. } => self.const_bool(false),
+            SelectedAccessArm::Nested(nested) => {
+                self.selected_access_tree_nullness_id(nested, instructions)
+            }
+        }
+    }
+
     pub(in crate::native::emitter) fn emit_mtl_force_not_checked_load_call(
         &mut self,
         call: &LlCall,
@@ -168,7 +207,7 @@ impl Emitter {
                     root_is_indexed_container: true,
                 },
             );
-            if !self.pointer_phi_values.is_empty() && !self.pointer_nullness.contains_key(name) {
+            if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(name) {
                 let is_null = self.const_bool(false)?;
                 self.record_pointer_nullness(name.to_string(), is_null);
             }
@@ -304,7 +343,7 @@ impl Emitter {
                 root_is_indexed_container: false,
             },
         );
-        if !self.pointer_phi_values.is_empty() && !self.pointer_nullness.contains_key(name) {
+        if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(name) {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -696,7 +735,7 @@ impl Emitter {
             ids.push(self.value_id_in(&arg.value, &arg.ty, instructions)?);
         }
         for value in &nullness_args {
-            ids.push(self.pointer_call_arg_nullness_id(value)?);
+            ids.push(self.pointer_call_arg_nullness_id(value, instructions)?);
         }
         ids.extend(workgroup_cursors);
         Ok(ids)
@@ -739,15 +778,102 @@ impl Emitter {
         Ok(Some(address))
     }
 
-    fn pointer_call_arg_nullness_id(&mut self, value: &LlValue) -> Result<Word, String> {
+    fn pointer_call_arg_nullness_id(
+        &mut self,
+        value: &LlValue,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Word, String> {
+        self.resolve_pointer_nullness_id(value, instructions, true)
+    }
+
+    pub(in crate::native::emitter) fn resolve_pointer_nullness_id(
+        &mut self,
+        value: &LlValue,
+        instructions: &mut Vec<Instruction>,
+        for_call_arg: bool,
+    ) -> Result<Word, String> {
         match value {
-            LlValue::Zero => self.const_bool(true),
-            LlValue::Local(name) => self.pointer_nullness.get(name).copied().ok_or_else(|| {
-                format!("native emitter: pointer nullness is not tracked for call argument {name}")
-            }),
-            LlValue::Global(_) => self.const_bool(false),
-            LlValue::Gep(gep) => self.pointer_call_arg_nullness_id(&gep.base.value),
-            _ => Err("native emitter: helper pointer nullness requires a pointer value".into()),
+            LlValue::Zero => {
+                if for_call_arg {
+                    self.const_bool(true)
+                } else {
+                    Err("native emitter: degenerate null pointer comparison".to_string())
+                }
+            }
+            LlValue::Undef | LlValue::Global(_) => self.const_bool(false),
+            LlValue::Gep(gep) => {
+                self.resolve_pointer_nullness_id(&gep.base.value, instructions, for_call_arg)
+            }
+            LlValue::Local(name) => {
+                if let Some(id) = self.pointer_nullness.get(name).copied() {
+                    return Ok(id);
+                }
+                if let Some(selected) = self.selected_pointers.get(name).cloned() {
+                    if let Some(id) = self.selected_pointer_nullness_id(&selected, instructions)? {
+                        self.record_pointer_nullness(name.clone(), id);
+                        return Ok(id);
+                    }
+                }
+                if let Some(tree) = self.selected_access_trees.get(name).cloned() {
+                    let id = self.selected_access_tree_nullness_id(&tree, instructions)?;
+                    self.record_pointer_nullness(name.clone(), id);
+                    return Ok(id);
+                }
+                if let Some(raw) = self.raw_offsets.get(name).cloned() {
+                    if raw.root != *name {
+                        if let Some(id) = self.pointer_nullness.get(&raw.root).copied() {
+                            self.record_pointer_nullness(name.clone(), id);
+                            return Ok(id);
+                        }
+                    }
+                    if let Some(base_addr) = raw.device_addr_base {
+                        let bool_ty = self.type_id(&LlType::Bool)?;
+                        let zero = self.const_signed_int(64, 0)?;
+                        let is_null = self.fresh();
+                        instructions.push(Self::inst(
+                            Op::IEqual,
+                            Some(bool_ty),
+                            Some(is_null),
+                            vec![Operand::IdRef(base_addr), Operand::IdRef(zero)],
+                        ));
+                        self.record_pointer_nullness(name.clone(), is_null);
+                        return Ok(is_null);
+                    }
+                    if self.direct_param_values.contains(&raw.root)
+                        || self.param_values.contains(&raw.root)
+                        || self.local_alloca_pointees.contains_key(&raw.root)
+                    {
+                        let is_null = self.const_bool(false)?;
+                        self.record_pointer_nullness(name.clone(), is_null);
+                        return Ok(is_null);
+                    }
+                }
+                if self.direct_param_values.contains(name)
+                    || self.local_alloca_pointees.contains_key(name)
+                    || self.gep_provenance.contains_key(name)
+                    || self.unmodeled_pointers.contains(name)
+                {
+                    let is_null = self.const_bool(false)?;
+                    self.record_pointer_nullness(name.clone(), is_null);
+                    return Ok(is_null);
+                }
+                if for_call_arg {
+                    Err(format!(
+                        "native emitter: pointer nullness is not tracked for call argument {name}"
+                    ))
+                } else {
+                    Err(format!(
+                        "native emitter: pointer nullness is not tracked for {name}"
+                    ))
+                }
+            }
+            _ => {
+                if for_call_arg {
+                    Err("native emitter: helper pointer nullness requires a pointer value".into())
+                } else {
+                    Err("native emitter: pointer nullness comparison requires SSA value".into())
+                }
+            }
         }
     }
 

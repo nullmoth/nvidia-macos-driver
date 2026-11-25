@@ -124,9 +124,13 @@ impl Emitter {
                 let pointee = gep_pointee(&parsed_source_ty, &gep.indices)?;
                 self.pointer_pointees
                     .insert(name.to_string(), pointee.clone());
-                if !self.pointer_phi_values.is_empty() {
+                if let Some(is_null) = self.pointer_nullness.get(base_name).copied() {
+                    self.record_pointer_nullness(name.to_string(), is_null);
+                } else if self.tracks_pointer_nullness() {
                     let is_null = self.const_bool(false)?;
                     self.record_pointer_nullness(name.to_string(), is_null);
+                }
+                if !self.pointer_phi_values.is_empty() {
                     self.materialize_raw_byte_index(name, &raw, true, instructions)?;
                     if self.raw_pointer_word_aligned(&raw) {
                         self.materialize_raw_word_index(name, &raw, true, instructions)?;
@@ -204,6 +208,12 @@ impl Emitter {
                     &gep.indices,
                     instructions,
                 )? {
+                    if let Some(storage) = self.pointer_storage.get(base_name).copied() {
+                        self.pointer_storage.insert(name.to_string(), storage);
+                    }
+                    if let Some(is_null) = self.pointer_nullness.get(base_name).copied() {
+                        self.record_pointer_nullness(name.to_string(), is_null);
+                    }
                     return Ok(None);
                 }
             }
@@ -475,7 +485,7 @@ impl Emitter {
                 .insert(name.to_string(), StorageClass::Function);
             self.pointer_pointees
                 .insert(name.to_string(), access_pointee);
-            if !self.pointer_phi_values.is_empty() {
+            if self.tracks_pointer_nullness() {
                 let is_null = self.const_bool(false)?;
                 self.record_pointer_nullness(name.to_string(), is_null);
             }
@@ -517,7 +527,7 @@ impl Emitter {
             self.pointer_pointees.insert(name.to_string(), pointee);
             self.raw_offsets.insert(name.to_string(), raw);
             self.unmodeled_pointers.insert(name.to_string());
-            if !self.pointer_phi_values.is_empty() {
+            if self.tracks_pointer_nullness() {
                 let is_null = self.const_bool(false)?;
                 self.record_pointer_nullness(name.to_string(), is_null);
             }
@@ -604,7 +614,7 @@ impl Emitter {
                     ));
                     self.pointer_storage.insert(name.to_string(), StorageClass::Workgroup);
                     self.pointer_pointees.insert(name.to_string(), lane_ty);
-                    if !self.pointer_phi_values.is_empty() {
+                    if self.tracks_pointer_nullness() {
                         let is_null = self.const_bool(false)?;
                         self.record_pointer_nullness(name.to_string(), is_null);
                     }
@@ -644,7 +654,7 @@ impl Emitter {
                     .insert(name.to_string(), access_storage);
                 self.pointer_pointees
                     .insert(name.to_string(), access_pointee.clone());
-                if !self.pointer_phi_values.is_empty() {
+                if self.tracks_pointer_nullness() {
                     let is_null = self.const_bool(false)?;
                     self.record_pointer_nullness(name.to_string(), is_null);
                 }
@@ -757,13 +767,10 @@ impl Emitter {
             .insert(name.to_string(), access_pointee);
         if let LlValue::Local(base_name) = &gep.base.value {
             if let Some(is_null) = self.pointer_nullness.get(base_name).copied() {
-                let known_non_null = self.const_bool(false)?;
-                if is_null == known_non_null {
-                    self.record_pointer_nullness(name.to_string(), known_non_null);
-                }
+                self.record_pointer_nullness(name.to_string(), is_null);
             }
         }
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(name) {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -883,7 +890,7 @@ impl Emitter {
         self.pointer_pointees
             .insert(name.to_string(), LlType::Int(8));
         self.byte_view_pointers.insert(name.to_string());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1113,7 +1120,7 @@ impl Emitter {
                 root_is_indexed_container: provenance.root_is_indexed_container,
             },
         );
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1208,7 +1215,7 @@ impl Emitter {
                 root_is_indexed_container: provenance.root_is_indexed_container,
             },
         );
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1318,7 +1325,7 @@ impl Emitter {
             .insert(name.to_string(), StorageClass::Private);
         self.pointer_pointees
             .insert(name.to_string(), pointee.clone());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1631,7 +1638,7 @@ impl Emitter {
             .insert(name.to_string(), StorageClass::Workgroup);
         self.pointer_pointees
             .insert(name.to_string(), source_ty.clone());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1807,7 +1814,7 @@ impl Emitter {
             .insert(name.to_string(), StorageClass::Workgroup);
         self.pointer_pointees
             .insert(name.to_string(), access_pointee.clone());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -1988,7 +1995,7 @@ impl Emitter {
             .insert(name.to_string(), StorageClass::Workgroup);
         self.pointer_pointees
             .insert(name.to_string(), elem.as_ref().clone());
-        if !self.pointer_phi_values.is_empty() {
+        if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }

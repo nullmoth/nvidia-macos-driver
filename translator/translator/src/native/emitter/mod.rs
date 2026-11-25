@@ -618,6 +618,80 @@ impl Emitter {
         Ok(all_nonnull)
     }
 
+    pub(in crate::native::emitter) fn tracks_pointer_nullness(&self) -> bool {
+        !self.pointer_phi_values.is_empty() || !self.function_param_nullness.is_empty()
+    }
+
+    fn pointer_param_origins(&self, function: &LlFunction, seed: &str) -> Vec<usize> {
+        let mut defs: HashMap<&str, &crate::native::tir::TirInst> = HashMap::default();
+        for inst in function.carrier_insts() {
+            if let Some(res) = inst.result.as_deref() {
+                defs.insert(res, inst);
+            }
+        }
+        let mut queue = vec![seed.to_string()];
+        let mut visited = HashSet::default();
+        let mut out = Vec::new();
+        while let Some(name) = queue.pop() {
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            if let Some(index) = function.params.iter().position(|(p, _)| p == &name) {
+                if !out.contains(&index) {
+                    out.push(index);
+                }
+                continue;
+            }
+            let Some(inst) = defs.get(name.as_str()) else {
+                continue;
+            };
+            if let Some(gep) = inst.gep() {
+                if let LlValue::Local(base) = &gep.base.value {
+                    queue.push(base.clone());
+                }
+                continue;
+            }
+            if let Some((src, _)) = inst.bitcast() {
+                if let LlValue::Local(base) = &src.value {
+                    queue.push(base.clone());
+                }
+                continue;
+            }
+            if matches!(
+                inst.opcode.as_str(),
+                "addrspacecast" | "freeze" | "metal2vulkan.inline_parameter"
+            ) {
+                if let Some(src) = inst
+                    .operands
+                    .first()
+                    .and_then(crate::native::tir::TirOperand::as_typed_value)
+                {
+                    if let LlValue::Local(base) = &src.value {
+                        queue.push(base.clone());
+                    }
+                }
+                continue;
+            }
+            if let Some((t, f)) = inst.select_arms().as_deref() {
+                if let LlValue::Local(base) = &t.value {
+                    queue.push(base.clone());
+                }
+                if let LlValue::Local(base) = &f.value {
+                    queue.push(base.clone());
+                }
+                continue;
+            }
+            if let Some((_, incoming)) = inst.phi_incoming().as_ref() {
+                for (val, _) in incoming {
+                    if let LlValue::Local(base) = val {
+                        queue.push(base.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
     pub(super) fn infer_function_param_nullness(
         &self,
         functions: &[LlFunction],
@@ -648,11 +722,7 @@ impl Emitter {
                     | (LlValue::Local(name), LlValue::Zero) => name,
                     _ => continue,
                 };
-                if let Some(index) = function
-                    .params
-                    .iter()
-                    .position(|(name, _)| name == observed)
-                {
+                for index in self.pointer_param_origins(function, observed) {
                     required.insert((function.name.clone(), index));
                 }
             }
@@ -673,14 +743,9 @@ impl Emitter {
                         let LlValue::Local(argument_name) = &argument.value else {
                             continue;
                         };
-                        let Some(caller_index) = function
-                            .params
-                            .iter()
-                            .position(|(name, _)| name == argument_name)
-                        else {
-                            continue;
-                        };
-                        changed |= required.insert((function.name.clone(), caller_index));
+                        for caller_index in self.pointer_param_origins(function, argument_name) {
+                            changed |= required.insert((function.name.clone(), caller_index));
+                        }
                     }
                 }
             }
@@ -727,6 +792,21 @@ impl Emitter {
                     {
                         nonnull.insert(name.clone());
                         changed = true;
+                    }
+                    continue;
+                }
+                if matches!(inst.opcode.as_str(), "addrspacecast" | "freeze")
+                    && matches!(inst.result_ty, Some(LlType::Ptr(_)))
+                {
+                    if let Some(src) = inst
+                        .operands
+                        .first()
+                        .and_then(crate::native::tir::TirOperand::as_typed_value)
+                    {
+                        if self.call_arg_known_nonnull(&src.value, &nonnull) {
+                            nonnull.insert(name.clone());
+                            changed = true;
+                        }
                     }
                     continue;
                 }

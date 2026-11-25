@@ -156,7 +156,7 @@ impl Emitter {
         self.pointer_pointees
             .insert(name.to_string(), self.resolve_type(pointee)?);
         self.unmodeled_pointers.insert(name.to_string());
-        if !self.pointer_phi_values.is_empty() && !self.pointer_nullness.contains_key(name) {
+        if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(name) {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
@@ -265,7 +265,7 @@ impl Emitter {
         self.pointer_storage
             .insert(name.to_string(), StorageClass::Private);
         self.unmodeled_pointers.insert(name.to_string());
-        if !self.pointer_phi_values.is_empty() && !self.pointer_nullness.contains_key(name) {
+        if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(name) {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }
