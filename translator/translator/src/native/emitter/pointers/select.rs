@@ -171,6 +171,11 @@ impl Emitter {
                     if let Some(meta) = pointer_meta {
                         self.record_pointer_meta(name.clone(), meta);
                     }
+                    if self.tracks_pointer_nullness() && !self.pointer_nullness.contains_key(&name)
+                    {
+                        let is_null = self.const_bool(false)?;
+                        self.record_pointer_nullness(name, is_null);
+                    }
                     return Ok(());
                 }
                 self.define_unmodeled_byte_pointer_value(&name, addrspace)?;
@@ -661,7 +666,7 @@ impl Emitter {
                 is_null
             };
             self.record_pointer_nullness(name.to_string(), is_null);
-        } else if !self.pointer_phi_values.is_empty() {
+        } else if self.tracks_pointer_nullness() {
             let is_null = self.const_bool(false)?;
             self.record_pointer_nullness(name.to_string(), is_null);
         }

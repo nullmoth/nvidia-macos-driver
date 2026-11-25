@@ -6041,6 +6041,56 @@ entry:
 }
 
 #[test]
+fn native_helper_nullness_tracks_through_derived_gep_without_pointer_phis() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+
+define void @k(ptr addrspace(1) %buf, ptr addrspace(1) %out, i1 %use_null, i1 %choose, i64 %off) {
+entry:
+  %p = getelementptr inbounds i8, ptr addrspace(1) %buf, i64 4
+  %a = call i1 @mid(ptr addrspace(1) %p, i1 %choose, i64 %off)
+  %b = call i1 @mid(ptr addrspace(1) null, i1 %choose, i64 %off)
+  %r = select i1 %use_null, i1 %b, i1 %a
+  %w = zext i1 %r to i32
+  store i32 %w, ptr addrspace(1) %out, align 4
+  ret void
+}
+
+define internal i1 @mid(ptr addrspace(1) %p, i1 %choose, i64 %off) {
+entry:
+  br i1 %choose, label %go, label %skip
+go:
+  %q = getelementptr i8, ptr addrspace(1) %p, i64 %off
+  %res = call i1 @leaf(ptr addrspace(1) %q, i1 %choose)
+  ret i1 %res
+skip:
+  ret i1 false
+}
+
+define internal i1 @leaf(ptr addrspace(1) %x, i1 %choose) {
+entry:
+  br i1 %choose, label %check, label %skip
+check:
+  %isnull = icmp eq ptr addrspace(1) %x, null
+  ret i1 %isnull
+skip:
+  ret i1 false
+}
+"#;
+    let spv = emit_vulkan_spirv(ll)
+        .expect("transitive helper nullness through GEP without pointer phis must succeed");
+    let module = load_bytes(&spv).expect("load native SPIR-V");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(
+        module.functions.iter().any(|f| f.parameters.len() == 4)
+            && module.functions.iter().any(|f| f.parameters.len() == 3),
+        "both @mid (4 params) and @leaf (3 params) must receive the nullness shadow parameter:\n{asm}"
+    );
+    assert!(asm.contains("OpConstantTrue"), "{asm}");
+    assert!(asm.contains("OpConstantFalse"), "{asm}");
+}
+
+#[test]
 fn native_multiblock_helper_carries_nullable_pointer_shadow() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"
