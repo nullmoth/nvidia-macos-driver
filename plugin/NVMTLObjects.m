@@ -3302,7 +3302,7 @@ static void nvmtl_heap_pin_take(NSArray *members, NSMutableArray **own, NSMutabl
             NVMTLTexture *texture = resource;
             buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
         }
-        if (buffer && (buffer->_hostPtr || buffer->_shadow.map)) [copies addObject:resource];
+        if (buffer && ((buffer->_hostPtr && !buffer->_hostReadOnly) || buffer->_shadow.map)) [copies addObject:resource];
     }
     atomic_fetch_add(&gHeapPinRefsTaken, members.count - skipped); atomic_fetch_add(&gHeapPinRefsSkipped, skipped);
 }
@@ -8809,7 +8809,7 @@ static void nvmtl_swc_sync_out(NVMTLBuffer *b)
     if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_shadow.size < b->_b.size ? b->_shadow.size : b->_b.size))
         nvlog("shared VRAM copy: copy-back of %zu bytes FAILED - contents keeps the CPU's last bytes", b->_b.size);
     else {
-        if (b->_hostPtr) memcpy(b->_hostPtr, b->_shadow.map, b->_hostLen < b->_shadow.size ? b->_hostLen : b->_shadow.size);
+        if (b->_hostPtr && !b->_hostReadOnly) memcpy(b->_hostPtr, b->_shadow.map, b->_hostLen < b->_shadow.size ? b->_hostLen : b->_shadow.size);
         nvmtl_swc_after_complete((nvmtl_swc *)b->_swc, b->_hostPtr ? b->_hostPtr : b->_shadow.map);
     }
     os_unfair_lock_unlock(&gSwcLock);
@@ -8817,7 +8817,7 @@ static void nvmtl_swc_sync_out(NVMTLBuffer *b)
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b)
 {
     if (b && b->_swc && b->_shadow.map) { nvmtl_swc_sync_in(b); return; }
-    if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen) return;
+    if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen || b->_hostReadOnly) return;
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_b.map, b->_hostPtr, b->_hostLen);
     nvmtl_perf_note(NVP_SYNCIN, t0, b->_hostLen);
@@ -8831,7 +8831,7 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
             if (nvmtl_vk_copy_buffer(nvmtl_device_queue(), &b->_b, 0, &b->_shadow, 0, b->_b.size)) nvlog("commit: managed sync-out of %zu bytes FAILED", b->_b.size); }
         return;
     }
-    if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen) return;
+    if (!b || !b->_hostPtr || !b->_b.map || !b->_hostLen || b->_hostReadOnly) return;
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_hostPtr, b->_b.map, b->_hostLen);
     nvmtl_perf_note(NVP_SYNCOUT, t0, b->_hostLen);

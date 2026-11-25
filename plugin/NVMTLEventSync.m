@@ -623,7 +623,7 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
                 !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
             buffer = texture->_backBuf ?: (texture->_parent ? texture->_parent->_backBuf : nil);
         }
-        if (!buffer || (!buffer->_hostPtr && !buffer->_shadow.map)) continue;
+        if (!buffer || ((!buffer->_hostPtr || buffer->_hostReadOnly) && !buffer->_shadow.map)) continue;
         if (!copies) copies = [NSMutableSet new];
         [copies addObject:buffer];
     }
@@ -636,7 +636,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // backings once, but refresh their bytes only when it actually submits.
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !buffer->_hostReadOnly) { part->hasHostCopies = YES; break; }
     }
     part->copyInputsPrepared = YES;
 }
