@@ -9445,6 +9445,54 @@ entry:
 }
 
 #[test]
+fn native_nullable_selected_float_gep_on_char_buffer_scales_byte_offset() {
+    let ll = r#"
+target triple = "air64_v28-apple-macosx26.7.0"
+
+define void @kernel_soft_max_min(ptr addrspace(1) %src0, ptr addrspace(1) %src2, ptr addrspace(1) %dst, i32 %i02) {
+entry:
+  %conv2 = sext i32 %i02 to i64
+  %cmp.not = icmp eq ptr addrspace(1) %src2, %src0
+  %p2 = bitcast ptr addrspace(1) %src2 to ptr addrspace(1)
+  %cond = select i1 %cmp.not, ptr addrspace(1) null, ptr addrspace(1) %p2
+  %tobool = icmp ne ptr addrspace(1) %cond, null
+  br i1 %tobool, label %has_sink, label %done
+
+has_sink:
+  %arrayidx = getelementptr inbounds float, ptr addrspace(1) %cond, i64 %conv2
+  %v = load float, ptr addrspace(1) %arrayidx, align 4
+  br label %done
+
+done:
+  %out = phi float [ %v, %has_sink ], [ 0.000000e+00, %entry ]
+  %dp = getelementptr inbounds float, ptr addrspace(1) %dst, i64 %conv2
+  store float %out, ptr addrspace(1) %dp, align 4
+  ret void
+}
+
+!air.kernel = !{!0}
+!0 = !{ptr @kernel_soft_max_min, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5, !6}
+!3 = !{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src0"}
+!4 = !{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"src2"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 2, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_size", i32 1, !"air.arg_type_align_size", i32 1, !"air.arg_type_name", !"char", !"air.arg_name", !"dst"}
+!6 = !{i32 3, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint"}
+"#;
+    let spv = crate::translate_native_no_retry_constructed_with_options(
+        ll,
+        Stage::Kernel,
+        crate::passes::TransformOptions::default(),
+    )
+    .expect("translate");
+    let post = disassemble(&spv).expect("post");
+    assert!(
+        post.contains("OpIMul"),
+        "must scale float index on char* buffer by 4:\n{post}"
+    );
+}
+
+#[test]
 fn native_selected_raw_byte_pointer_half_store_keeps_raw_offset() {
     let ll = r#"
 target triple = "spirv-unknown-vulkan1.2"

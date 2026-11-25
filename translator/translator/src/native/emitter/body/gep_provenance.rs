@@ -535,9 +535,15 @@ impl Emitter {
         )? {
             return Ok(Some(result));
         }
+        let actual_base_is_byte = matches!(
+            &gep.base.value,
+            LlValue::Local(base_name)
+                if self.byte_view_pointers.contains(base_name)
+                    && self.pointer_pointees.get(base_name) == Some(&LlType::Int(8))
+        );
         if !was_composed
             && indices.len() == 1
-            && matches!(base_pointee.as_ref(), Some(LlType::Int(8)))
+            && (matches!(base_pointee.as_ref(), Some(LlType::Int(8))) || actual_base_is_byte)
             && is_byte_view_scalar_or_vector_source(&source_ty)
             && !matches!(base_storage, StorageClass::Private | StorageClass::Function)
         {
@@ -550,6 +556,11 @@ impl Emitter {
                 &indices[0],
                 instructions,
             )?;
+            if let LlValue::Local(base_name) = &gep.base.value {
+                if let Some(is_null) = self.pointer_nullness.get(base_name).copied() {
+                    self.record_pointer_nullness(name.to_string(), is_null);
+                }
+            }
             return Ok(Some(result));
         }
         let access_storage = if base_storage == StorageClass::Private

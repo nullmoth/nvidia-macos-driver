@@ -597,21 +597,74 @@ impl Emitter {
             self.raw_buffer_layout_required = true;
             return Err("native emitter: nullable selected GEP requires a proven source layout; use raw byte-offset construction".into());
         }
-        self.emit_selected_pointer_access_chain_from_concrete_arm(
-            result,
-            ptr_type,
-            concrete_value,
-            &selected.ty,
-            source_ty,
-            indices,
-            instructions,
-        )?;
+        let (root, fact_source_ty, fact_indices) = self
+            .emit_selected_pointer_access_chain_from_concrete_arm(
+                result,
+                ptr_type,
+                concrete_value,
+                &selected.ty,
+                source_ty,
+                indices,
+                instructions,
+            )?;
         self.pointer_storage.insert(name.to_string(), storage);
         self.pointer_pointees
             .insert(name.to_string(), pointee.clone());
         if let Some(is_null) = self.selected_pointer_nullness_id(selected, instructions)? {
             self.record_pointer_nullness(name.to_string(), is_null);
         }
+        let addrspace = match self.resolve_type(&selected.ty)? {
+            LlType::Ptr(addrspace) => addrspace,
+            _ => 1,
+        };
+        let raw = self.apply_raw_gep(
+            RawBufferOffset::root(String::new(), addrspace),
+            &fact_source_ty,
+            &fact_indices,
+        )?;
+        if !raw.unmodelable && raw.const_off >= 0 {
+            if raw.dyn_terms.is_empty() {
+                self.emit_sidecar.buffer_access_offsets.push(
+                    crate::emit_sidecar::BufferAccessOffset {
+                        id: result,
+                        root,
+                        byte_offset: raw.const_off as u64,
+                    },
+                );
+            } else if raw.dyn_terms.iter().all(|(_, stride)| *stride >= 0) {
+                let terms = raw
+                    .dyn_terms
+                    .iter()
+                    .map(|(index, stride)| {
+                        Ok((
+                            self.value_id(&index.value, &index.ty)?,
+                            u64::try_from(*stride).map_err(|_| {
+                                "native emitter: negative affine buffer stride".to_string()
+                            })?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                self.emit_sidecar.buffer_access_affine_offsets.push(
+                    crate::emit_sidecar::BufferAccessAffineOffset {
+                        id: result,
+                        root,
+                        constant: raw.const_off as u64,
+                        terms,
+                    },
+                );
+            }
+        }
+        self.gep_provenance.insert(
+            name.to_string(),
+            GepProvenance {
+                root,
+                addrspace,
+                source_ty: fact_source_ty,
+                indices: fact_indices,
+                root_indices: None,
+                root_is_indexed_container: self.is_indexed_container_root(root, Some(storage)),
+            },
+        );
         Ok(true)
     }
 
@@ -648,7 +701,7 @@ impl Emitter {
         source_ty: &LlType,
         indices: &[TypedValue],
         instructions: &mut Vec<Instruction>,
-    ) -> Result<(), String> {
+    ) -> Result<(Word, LlType, Vec<TypedValue>), String> {
         if let LlValue::Local(base_name) = base_value {
             if let Some(prev) = self.gep_provenance.get(base_name).cloned() {
                 let name = format!("%air.selgep.{result}");
@@ -664,7 +717,7 @@ impl Emitter {
                         ops.push(Operand::IdRef(self.value_id(&idx.value, &idx.ty)?));
                     }
                     instructions.push(Self::inst(op, Some(ptr_type), Some(result), ops));
-                    return Ok(());
+                    return Ok((prev.root, prev.source_ty, indices));
                 }
             }
         }
@@ -676,7 +729,7 @@ impl Emitter {
             ops.push(Operand::IdRef(self.value_id(&idx.value, &idx.ty)?));
         }
         instructions.push(Self::inst(op, Some(ptr_type), Some(result), ops));
-        Ok(())
+        Ok((base, source_ty.clone(), indices.to_vec()))
     }
 
     pub(in crate::native::emitter) fn emit_selected_pointer_access_chain_from_id(
