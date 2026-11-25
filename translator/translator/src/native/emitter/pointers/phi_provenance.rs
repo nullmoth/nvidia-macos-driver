@@ -312,6 +312,13 @@ impl Emitter {
         value: &LlValue,
         ty: &LlType,
     ) -> Result<Option<Word>, String> {
+        if matches!(
+            value,
+            LlValue::Local(name)
+                if self.pointer_phi_values.contains(name) && !self.values.contains_key(name)
+        ) {
+            return Ok(None);
+        }
         if let Ok(id) = self.value_id(value, ty) {
             return Ok(Some(id));
         }
