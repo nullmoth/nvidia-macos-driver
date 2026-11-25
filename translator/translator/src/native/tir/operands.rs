@@ -579,7 +579,15 @@ fn first_type_from(toks: &[&str], candidate: &mut String) -> Option<LlType> {
             }
             candidate.push_str(tok);
         }
-        if let Ok(ty) = parse_type(candidate.trim_end_matches(',')) {
+        let trimmed = candidate.trim_end_matches(',');
+        if trimmed == "ptr"
+            && toks
+                .get(end)
+                .is_some_and(|next| next.starts_with("addrspace("))
+        {
+            continue;
+        }
+        if let Ok(ty) = parse_type(trimmed) {
             return Some(ty);
         }
     }
@@ -659,7 +667,15 @@ mod first_type_tests {
         for begin in (start..toks.len()).take(begins) {
             for end in (begin + 1)..=toks.len() {
                 let candidate = toks[begin..end].join(" ");
-                if let Ok(ty) = parse_type(candidate.trim_end_matches(',')) {
+                let trimmed = candidate.trim_end_matches(',');
+                if trimmed == "ptr"
+                    && toks
+                        .get(end)
+                        .is_some_and(|next| next.starts_with("addrspace("))
+                {
+                    continue;
+                }
+                if let Ok(ty) = parse_type(trimmed) {
                     return Some(ty);
                 }
             }
@@ -688,6 +704,7 @@ mod first_type_tests {
             "extractelement <4 x float> %v, i32 2",
             "call bfloat @b(bfloat %x)",
             "call metadata @m()",
+            "phi ptr addrspace(1) [ %a, %b ], [ null, %c ]",
         ];
         for line in lines {
             for start in 0..3 {
@@ -703,5 +720,16 @@ mod first_type_tests {
                 "first_type_token `{line}`"
             );
         }
+        assert_eq!(
+            first_type_token("ptr addrspace(1) %a"),
+            Some(LlType::Ptr(1))
+        );
+        assert_eq!(
+            resolve_result(
+                "  %cond59 = select i1 %cmp47, ptr addrspace(1) %add.ptr56, ptr addrspace(1) %20",
+                &HashMap::default()
+            ),
+            Some(("%cond59".to_string(), Some(LlType::Ptr(1))))
+        );
     }
 }
