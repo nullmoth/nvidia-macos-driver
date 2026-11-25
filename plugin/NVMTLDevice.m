@@ -3067,17 +3067,17 @@ static BOOL nvmtl_family_answer(NSInteger f, BOOL yes, const char *why)
 - (BOOL)supportsSampleCount:(NSUInteger)n { return [self nvmtlSampleCountOK:n]; }
 
 - (NSUInteger)maxBufferLength {
-    uint64_t range = 0; nvmtl_vk_pubcaps(NULL, NULL, &range, NULL);
+    uint64_t range = nvmtl_vk_max_buffer_bytes();
     if (!range) { static int said; if (!said++) nvlog("maxBufferLength: NVK limits unavailable - answering 0 (UNKNOWN)"); return 0; }
     // A zero working set means the budget is UNKNOWN, not that no buffer can be made. maxBufferLength
     // is a capability an app may treat as hard, and three quarters of zero is zero, so an unknown
     // budget leaves NVK's own range as the answer rather than reporting that nothing fits.
     const uint64_t ws = nvmtl_vk_working_set();
-    uint64_t three_q = ws / 4 * 3;
-    if (!ws) { static int saidws; if (!saidws++) nvlog("maxBufferLength: working set UNKNOWN - answering NVK's maxStorageBufferRange alone"); three_q = range; }
+    uint64_t three_q = (ws / 4 * 3) & ~0x3fffULL;
+    if (!ws) { static int saidws; if (!saidws++) nvlog("maxBufferLength: working set UNKNOWN - answering NVK's max buffer limit alone"); three_q = range; }
     uint64_t v = range < three_q ? range : three_q;
     static int said;
-    if (!said++) nvlog("maxBufferLength -> %llu MB (NVK maxStorageBufferRange %llu MB, 3/4 of working set %llu MB)",
+    if (!said++) nvlog("maxBufferLength -> %llu MB (NVK max buffer %llu MB, 3/4 of working set %llu MB)",
                        (unsigned long long)(v >> 20), (unsigned long long)(range >> 20), (unsigned long long)(three_q >> 20));
     return (NSUInteger)v;
 }

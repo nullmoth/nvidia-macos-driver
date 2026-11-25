@@ -437,6 +437,8 @@ static int g_compute_unchecked;   /* compute pipelines skip buffer bounds checks
  * buffer's end (Apple GPUs tolerate it) then reads mapped memory instead of faulting the channel. Pool sub-allocations
  * already have mapped neighbours; this covers the end of each standalone allocation and each pool block.
  * NVMTL_BUF_GUARD=<bytes> overrides the 64 KB. */
+static uint64_t g_max_alloc_size;
+static uint64_t g_max_buffer_size;
 static VkDeviceSize nvmtl_buf_guard(void)
 {
     static long long g = -1;
@@ -1182,11 +1184,16 @@ static int nvmtl_vk_initialize(void)
     snprintf(g_name, sizeof g_name, "%s", pp.deviceName);
     g_lim = pp.limits;
     { VkPhysicalDeviceShaderSMBuiltinsPropertiesNV sm = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SM_BUILTINS_PROPERTIES_NV };
-      VkPhysicalDeviceProperties2 p2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &sm };
+      VkPhysicalDeviceMaintenance3Properties m3 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES, &sm };
+      VkPhysicalDeviceMaintenance4Properties m4 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES, &m3 };
+      VkPhysicalDeviceProperties2 p2 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &m4 };
       pvkGetPhysicalDeviceProperties2(g_pdev, &p2); g_sm_count = sm.shaderSMCount;
-      nvlog("vk: limits — image array layers %u, shared memory %u B, workgroup %ux%ux%u (%u invocations), SMs %u",
+      g_max_alloc_size = m3.maxMemoryAllocationSize;
+      g_max_buffer_size = m4.maxBufferSize;
+      nvlog("vk: limits — image array layers %u, shared memory %u B, workgroup %ux%ux%u (%u invocations), SMs %u, maxAlloc %llu MB, maxBuffer %llu MB",
             g_lim.maxImageArrayLayers, g_lim.maxComputeSharedMemorySize, g_lim.maxComputeWorkGroupSize[0], g_lim.maxComputeWorkGroupSize[1],
-            g_lim.maxComputeWorkGroupSize[2], g_lim.maxComputeWorkGroupInvocations, g_sm_count); }
+            g_lim.maxComputeWorkGroupSize[2], g_lim.maxComputeWorkGroupInvocations, g_sm_count,
+            (unsigned long long)(g_max_alloc_size >> 20), (unsigned long long)(g_max_buffer_size >> 20)); }
     pvkGetPhysicalDeviceMemoryProperties(g_pdev, &g_memp);
 
     uint32_t qn = 0; pvkGetPhysicalDeviceQueueFamilyProperties(g_pdev, &qn, NULL);
@@ -1685,6 +1692,18 @@ void nvmtl_vk_pubcaps(uint32_t *color_samples, uint32_t *depth_samples, uint64_t
         uint64_t t = up ? (uint64_t)g_lim.minTexelBufferOffsetAlignment : 0;
         *linear_align = a > t ? a : t;
     }
+}
+
+uint64_t nvmtl_vk_max_buffer_bytes(void) {
+    if (g_state != 1) return 0;
+    uint64_t cap = (uint64_t)g_lim.maxStorageBufferRange;
+    if (g_max_buffer_size && (!cap || g_max_buffer_size < cap)) cap = g_max_buffer_size;
+    if (g_max_alloc_size) {
+        const uint64_t guard = (uint64_t)nvmtl_buf_guard();
+        const uint64_t usable = g_max_alloc_size > guard ? g_max_alloc_size - guard : 0;
+        if (!cap || usable < cap) cap = usable;
+    }
+    return cap & ~0x3fffULL;
 }
 
 static int memtype(uint32_t bits, VkMemoryPropertyFlags want)
