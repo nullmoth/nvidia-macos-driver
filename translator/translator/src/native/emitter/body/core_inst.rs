@@ -1850,8 +1850,14 @@ impl Emitter {
                 }
                 if let Some(tree) = self.selected_access_trees.get(src_name).cloned() {
                     self.selected_access_trees.insert(name.clone(), tree);
+                    if let Some(storage) = self.pointer_storage.get(src_name).copied() {
+                        self.pointer_storage.insert(name.clone(), storage);
+                    }
                     if let Some(pointee) = self.pointer_pointees.get(src_name).cloned() {
                         self.pointer_pointees.insert(name.clone(), pointee);
+                    }
+                    if let Some(is_null) = self.pointer_nullness.get(src_name).copied() {
+                        self.record_pointer_nullness(name.clone(), is_null);
                     }
                     if self.param_values.contains(src_name) {
                         self.param_values.insert(name.clone());

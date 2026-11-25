@@ -315,7 +315,9 @@ impl Emitter {
         indices: &[TypedValue],
         instructions: &mut Vec<Instruction>,
     ) -> Result<bool, String> {
-        if !types_compatible(&self.resolve_type(&tree.pointee)?, source_ty) {
+        if !super::raw_select::selected_access_tree_is_all_raw(tree)
+            && !types_compatible(&self.resolve_type(&tree.pointee)?, source_ty)
+        {
             return Ok(false);
         }
         let tree = self.apply_selected_access_tree_gep(tree, source_ty, indices, instructions)?;

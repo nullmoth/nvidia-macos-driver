@@ -1,5 +1,29 @@
 use super::*;
 
+pub(super) fn selected_access_arm_is_all_raw(arm: &SelectedAccessArm) -> bool {
+    match arm {
+        SelectedAccessArm::Raw(_) | SelectedAccessArm::Null => true,
+        SelectedAccessArm::Nested(nested) => selected_access_tree_is_all_raw(nested),
+        SelectedAccessArm::Typed { .. } => false,
+    }
+}
+
+pub(super) fn selected_access_tree_is_all_raw(tree: &SelectedAccessTree) -> bool {
+    selected_access_arm_is_all_raw(&tree.true_arm)
+        && selected_access_arm_is_all_raw(&tree.false_arm)
+}
+
+fn selected_access_arm_needs_guarded_load(arm: &SelectedAccessArm) -> bool {
+    match arm {
+        SelectedAccessArm::Null | SelectedAccessArm::Raw(_) => true,
+        SelectedAccessArm::Nested(nested) => {
+            selected_access_arm_needs_guarded_load(&nested.true_arm)
+                || selected_access_arm_needs_guarded_load(&nested.false_arm)
+        }
+        SelectedAccessArm::Typed { .. } => false,
+    }
+}
+
 impl Emitter {
     pub(in crate::native::emitter) fn emit_selected_pointer_direct_load(
         &mut self,
@@ -74,6 +98,14 @@ impl Emitter {
         if let LlValue::Local(name) = value {
             if self.null_rooted_pointer_values.contains(name) {
                 return self.undef_id(load_ty);
+            }
+            if let Some(tree) = self.selected_access_trees.get(name).cloned() {
+                return self.emit_selected_access_tree_load_value(
+                    &tree,
+                    load_ty,
+                    access_align,
+                    instructions,
+                );
             }
             if let Some(selected) = self.selected_pointers.get(name).cloned() {
                 let loaded = self.fresh();
@@ -326,14 +358,16 @@ impl Emitter {
         access_align: Option<u64>,
         instructions: &mut Vec<Instruction>,
     ) -> Result<Word, String> {
-        if !types_compatible(&self.resolve_type(&tree.pointee)?, result_ty) {
+        if !selected_access_tree_is_all_raw(tree)
+            && !types_compatible(&self.resolve_type(&tree.pointee)?, result_ty)
+        {
             return Err(format!(
                 "native emitter: selected access tree load type mismatch {:?} vs {result_ty:?}",
                 tree.pointee
             ));
         }
-        if matches!(tree.true_arm, SelectedAccessArm::Null)
-            || matches!(tree.false_arm, SelectedAccessArm::Null)
+        if selected_access_arm_needs_guarded_load(&tree.true_arm)
+            || selected_access_arm_needs_guarded_load(&tree.false_arm)
         {
             let true_label = self.fresh();
             let false_label = self.fresh();
@@ -478,7 +512,9 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         let object_ty = self.resolve_type(object_ty)?;
-        if !types_compatible(&self.resolve_type(&tree.pointee)?, &object_ty) {
+        if !selected_access_tree_is_all_raw(tree)
+            && !types_compatible(&self.resolve_type(&tree.pointee)?, &object_ty)
+        {
             return Err(format!(
                 "native emitter: selected access tree store type mismatch {:?} vs {object_ty:?}",
                 tree.pointee
@@ -796,6 +832,33 @@ impl Emitter {
             return Ok(false);
         };
         if true_raw.root != false_raw.root || true_raw.addrspace != false_raw.addrspace {
+            if !true_raw.unmodelable
+                && !false_raw.unmodelable
+                && !(self.bda_device_pointers
+                    && true_raw.device_addr_base.is_some()
+                    && false_raw.device_addr_base.is_some())
+            {
+                let pointee = self
+                    .tir_use_pointees
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(LlType::Int(8));
+                self.selected_access_trees.insert(
+                    name.to_string(),
+                    SelectedAccessTree {
+                        cond: cond_id,
+                        true_arm: SelectedAccessArm::Raw(true_raw),
+                        false_arm: SelectedAccessArm::Raw(false_raw),
+                        pointee: pointee.clone(),
+                    },
+                );
+                self.pointer_storage
+                    .insert(name.to_string(), llvm_pointer_storage(*addrspace)?);
+                self.pointer_pointees.insert(name.to_string(), pointee);
+                let is_null = self.const_bool(false)?;
+                self.record_pointer_nullness(name.to_string(), is_null);
+                return Ok(true);
+            }
             return Ok(false);
         }
         if !self.raw_pointer_word_aligned(&true_raw) || !self.raw_pointer_word_aligned(&false_raw) {
