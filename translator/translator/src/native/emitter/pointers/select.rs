@@ -245,7 +245,7 @@ impl Emitter {
                 Operand::IdRef(false_id),
             ],
         ));
-        if let Some(meta) = pointer_meta {
+        if let Some(mut meta) = pointer_meta {
             let selected = SelectedPointer {
                 ty: result_ty.clone(),
                 cond: cond_id,
@@ -257,7 +257,25 @@ impl Emitter {
                     self.record_pointer_nullness(name.clone(), is_null);
                 }
             }
+            if meta.pointee.is_none()
+                && self.type_pointer_pointee_id(result_type) == self.type_id(&LlType::Int(8)).ok()
+            {
+                meta.pointee = Some(LlType::Int(8));
+            }
+            if matches!(meta.pointee, Some(LlType::Int(8)))
+                && matches!(
+                    meta.storage,
+                    StorageClass::StorageBuffer | StorageClass::UniformConstant
+                )
+            {
+                self.byte_view_pointers.insert(name.clone());
+            }
             self.record_pointer_meta(name.clone(), meta);
+        } else if matches!(result_ty, LlType::Ptr(_))
+            && self.type_pointer_pointee_id(result_type) == self.type_id(&LlType::Int(8)).ok()
+        {
+            self.pointer_pointees.insert(name.clone(), LlType::Int(8));
+            self.byte_view_pointers.insert(name.clone());
         }
         if let Some(provenance) = pointer_provenance {
             self.gep_provenance.insert(name.clone(), provenance);
