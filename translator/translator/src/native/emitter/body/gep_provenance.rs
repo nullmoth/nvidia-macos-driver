@@ -165,6 +165,8 @@ impl Emitter {
                     } else {
                         self.define_unmodeled_pointer_value(name, addrspace, &pointee)?;
                     }
+                } else {
+                    self.define_unmodeled_byte_pointer_value(name, addrspace)?;
                 }
                 return Ok(self.values.get(name).map(|(id, _)| *id));
             }
@@ -665,7 +667,13 @@ impl Emitter {
         }
         let pointee_points_to_aggregate =
             matches!(pointee, LlType::Array(_, _) | LlType::Struct(_));
-        let struct_base_stride = matches!(base_pointee.as_ref(), Some(LlType::Struct(_)));
+        let incompatible_aggregate_base = base_pointee.as_ref().is_some_and(|base_ty| {
+            base_points_to_aggregate && !types_compatible(base_ty, &source_ty)
+        });
+        let struct_base_stride = matches!(base_pointee.as_ref(), Some(LlType::Struct(_)))
+            && base_pointee
+                .as_ref()
+                .is_some_and(|base_ty| types_compatible(base_ty, &source_ty));
         let array_base_stride = matches!(base_pointee.as_ref(), Some(LlType::Array(_, _)))
             && base_pointee
                 .as_ref()
@@ -676,21 +684,20 @@ impl Emitter {
             &gep.base.value,
             LlValue::Local(base_name) if self.pointer_phi_values.contains(base_name)
         );
-        let use_ptr_access_chain = decide_ptr_access_chain(PtrAccessChainInputs {
-            pointee_points_to_aggregate,
-            base_storage: access_storage,
-            is_indexed_container_root: self.is_indexed_container_root(base, Some(access_storage)),
-            struct_base_stride,
-            array_base_stride,
-            first_index_nonzero,
-            was_composed,
-            base_is_param,
-            base_points_to_aggregate,
-            base_is_pointer_phi,
-        });
-        let incompatible_aggregate_base = base_pointee.as_ref().is_some_and(|base_ty| {
-            base_points_to_aggregate && !types_compatible(base_ty, &source_ty)
-        });
+        let use_ptr_access_chain = !incompatible_aggregate_base
+            && decide_ptr_access_chain(PtrAccessChainInputs {
+                pointee_points_to_aggregate,
+                base_storage: access_storage,
+                is_indexed_container_root: self
+                    .is_indexed_container_root(base, Some(access_storage)),
+                struct_base_stride,
+                array_base_stride,
+                first_index_nonzero,
+                was_composed,
+                base_is_param,
+                base_points_to_aggregate,
+                base_is_pointer_phi,
+            });
         let reinterpreted_workgroup_indices =
             if incompatible_aggregate_base && base_storage == StorageClass::Workgroup {
                 base_pointee.as_ref().map_or(Ok(None), |base_ty| {
@@ -1793,7 +1800,9 @@ impl Emitter {
         };
         let ptr_type = self.ptr_type_id(StorageClass::Workgroup, &access_pointee)?;
         let result = self.result_id(name, &LlType::Ptr(addrspace))?;
-        let op = if self.is_workgroup_global_root(access_base) {
+        let op = if self.is_workgroup_global_root(access_base)
+            || self.is_workgroup_indexed_container_root(access_base)
+        {
             Op::InBoundsAccessChain
         } else {
             Op::PtrAccessChain
@@ -1964,7 +1973,10 @@ impl Emitter {
                 .get(param)
                 .is_some_and(|(id, _)| *id == access_base)
         });
-        let use_ptr_access_chain = !access_base_is_param_root && !base_is_param;
+        let use_ptr_access_chain = !access_base_is_param_root
+            && !base_is_param
+            && !self.is_workgroup_global_root(access_base)
+            && !self.is_workgroup_indexed_container_root(access_base);
         let spirv_indices = if use_ptr_access_chain {
             access_indices.clone()
         } else {
