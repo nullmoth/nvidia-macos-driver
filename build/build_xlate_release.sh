@@ -43,6 +43,10 @@ ssh "$H" "set -e
 mkdir -p "$OUT"
 scp -q "$H:$R/out/libnvmtl_translate.dylib" "$H:$R/out/cargo.log" "$OUT/"
 D="$OUT/libnvmtl_translate.dylib"
+# A translator whose signature does not cover the whole file is refused by dlopen, and the plugin then answers every
+# library with "newLibraryWithData: translation produced nothing" instead of a shader error. Verify the copy that came
+# back, after the signature was made, so that fails here and not in a game.
+codesign --verify --strict "$D" 2>/dev/null || { echo "STOP: $D does not verify - its signature does not cover the whole file, so dlopen refuses it"; exit 6; }
 bash "$HERE/build/warn_ceiling.sh" translator "$(grep -c '^warning' "$OUT/cargo.log" || true)" "$OUT/cargo.log" || exit 4
 left=$(strings -a "$D" | grep -cE '/Users/|/Volumes/' || true)
 [ "$left" = 0 ] || { echo "STOP: $left build machine path(s) left in the dylib"; strings -a "$D" | grep -E '/Users/|/Volumes/' | sort -u | head -5; exit 5; }
