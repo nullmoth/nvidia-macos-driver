@@ -357,6 +357,16 @@ static int nvmtl_skip_empty_on(void) {
 }
 
 @implementation NVMTLCommandBuffer (EventSubmission)
+- (BOOL)nvmtlHasPriorQueueWork {
+    for (NVMTLCommandBuffer *other in nvmtl_pending_buffers)
+        if (other != self && !other->_executionDone) return YES;
+    if (!_queue || !_queue->_reservations.count) return NO;
+    for (NVMTLQueueReservation *r in _queue->_reservations) {
+        if (!r->buffer) continue;
+        return r != _reservation;
+    }
+    return NO;
+}
 - (void)nvmtlReserveQueue {
     if (_reservation) return;
     NVMTLQueueReservation *r = [NVMTLQueueReservation new]; r->buffer = self;
@@ -375,6 +385,19 @@ static int nvmtl_skip_empty_on(void) {
     part->commands = _c;
     memset(&_c, 0, sizeof(_c));
     part->resources = [(NVMTLResSet *)_resources nvmtlTakeAll]; part->surfaces = [_surfDirty copy];
+    if (_hostPublications.count) {
+        objc_setAssociatedObject(part, nvmtl_host_pubs_key, [_hostPublications copy], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [_hostPublications removeAllObjects];
+    }
+    {
+        NVMTLResSet *rs = [part->resources isKindOfClass:[NVMTLResSet class]] ? (NVMTLResSet *)part->resources : nil;
+        for (id r in part->resources) {
+            if ([r isKindOfClass:[NVMTLBuffer class]]) {
+                NVMTLBuffer *b = r;
+                if (b->_hostPtr && (!rs || [rs isWrittenObject:b] || b->_texSeen)) b->_everGpuWritten = YES;
+            }
+        }
+    }
     // Another process may read an IOSurface once its writer is scheduled, and nothing orders its queue after ours.
     // A surface whose VRAM is shared is covered by the kernel (a CPU lock's page-off waits for the pending write); one we
     // write through a private image is copied out only after the GPU has finished, and a CPU lock does not wait for that.
@@ -412,6 +435,8 @@ static int nvmtl_skip_empty_on(void) {
     // completed and the next dispatch wrote its destroyed image view (NVK abort in get_sampled_image_view_desc under
     // nvk_UpdateDescriptorSets: mediaanalysisd, Safari, wallpapers).
     if (restart) for (id o in (NVMTLResSet *)part->resources) [(NVMTLResSet *)_resources addObject:o];
+    // Local: the part's read-only members go back to read-only, and out of the MRU -addObject: just put them in.
+    if (restart) [(NVMTLResSet *)_resources nvmtlSyncWrittenFrom:(NVMTLResSet *)part->resources];
     if (restart && nvmtl_vk_cmd_begin(&_queue->_q, &_c)) {
         _cbError = [NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorOutOfMemory
             userInfo:@{NSLocalizedDescriptionKey:@"Could not allocate recording after event boundary"}];
@@ -540,7 +565,7 @@ static int nvmtl_skip_empty_on(void) {
     // autorelease pool can keep thousands of finished command buffers alive during a long loop (Geekbench 7 does),
     // and holding these until the command buffer itself died filled VRAM until allocations were refused.
     [_scratch removeAllObjects]; _e78Ring = nil; _e78RingOff = 0; memset(_g79BRing, 0, sizeof _g79BRing);
-    [(NVMTLResSet *)_resources removeAllObjects]; [_stTwins removeAllObjects];
+    [(NVMTLResSet *)_resources removeAllObjects]; [_stTwins removeAllObjects]; [_hostPublications removeAllObjects];
     // Applications may retain completed command buffers. Pending overwrite
     // bookkeeping must not keep their IOSurfaces and VRAM alive indefinitely.
     [_surfOverwrites removeAllObjects]; _surfOverwrites = nil;
@@ -607,6 +632,16 @@ static void nvmtl_gsub_census(void) {
 // A texture over a copy-backed buffer must refresh the same bytes as a direct
 // buffer binding. Keep direct managed-buffer writeback and copy each backing once.
 static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL writtenOnly) {
+    static SEL cachedWrittenSel;
+    SEL writtenSel = NULL;
+    if (writtenOnly) {
+        writtenSel = __atomic_load_n(&cachedWrittenSel, __ATOMIC_RELAXED);
+        if (!writtenSel) {
+            writtenSel = sel_registerName("nvmtlIsBufferWritten:");
+            __atomic_store_n(&cachedWrittenSel, writtenSel, __ATOMIC_RELAXED);
+        }
+    }
+    BOOL trackWritten = writtenSel && [resources respondsToSelector:writtenSel];
     NSMutableSet<NVMTLBuffer *> *copies = nil;
     for (id resource in resources) {
         if ([resource isKindOfClass:[NVMTLHeapPin class]]) {   // a used heap: its members with a host copy
@@ -616,8 +651,13 @@ static NSArray<NVMTLBuffer *> *nvmtl_submission_copies(NSSet *resources, BOOL wr
             continue;
         }
         NVMTLBuffer *buffer = nil;
-        if ([resource isKindOfClass:[NVMTLBuffer class]]) buffer = resource;
-        else if ([resource isKindOfClass:[NVMTLTexture class]]) {
+        if ([resource isKindOfClass:[NVMTLBuffer class]]) {
+            NVMTLBuffer *candidate = resource;
+            if (trackWritten && !candidate->_shadow.map &&
+                !((BOOL (*)(id, SEL, id))[resources methodForSelector:writtenSel])(resources, writtenSel, candidate))
+                continue;
+            buffer = candidate;
+        } else if ([resource isKindOfClass:[NVMTLTexture class]]) {
             NVMTLTexture *texture = resource;
             if (writtenOnly && texture->_usage != MTLTextureUsageUnknown &&
                 !(texture->_usage & (MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget))) continue;
@@ -634,9 +674,20 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // A sealed part's membership and its buffers' backing modes do not change.
     // The ahead pass can retry a held part many times: discover its upload
     // backings once, but refresh their bytes only when it actually submits.
+    static SEL cachedMutableSel;
+    SEL mutableSel = __atomic_load_n(&cachedMutableSel, __ATOMIC_RELAXED);
+    if (!mutableSel) {
+        mutableSel = sel_registerName("nvmtlHasMutableHostCopy:");
+        __atomic_store_n(&cachedMutableSel, mutableSel, __ATOMIC_RELAXED);
+    }
+    BOOL queryMutable = [part->resources respondsToSelector:mutableSel];
     part->copyInputs = nvmtl_submission_copies(part->resources, NO);
     for (NVMTLBuffer *buffer in part->copyInputs) {
-        if (buffer->_hostPtr) { part->hasHostCopies = YES; break; }
+        if (buffer->_hostPtr && !nvmtl_owned_host_shadow_buf(buffer) &&
+            (!queryMutable || ((BOOL (*)(id, SEL, id))[part->resources methodForSelector:mutableSel])(part->resources, mutableSel, buffer))) {
+            part->hasHostCopies = YES;
+            break;
+        }
     }
     part->copyInputsPrepared = YES;
 }
@@ -644,6 +695,27 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
     // a commit still putting its kernel marks in (nvmtlSubmitWithEvents) must not reach the GPU before them
     if (_executionDone || _partsRetiring || _cbError || !_committed || _commitMarking) return NO;
     if (_nextSubmit < _nextPart) _nextSubmit = _nextPart;
+    // Local guard (Shared/NoCopy data race): a channel promise cannot order a part's CPU host copies against GPU writes
+    // still pending in this buffer or on another active command buffer, and NVMTL_GSUB_HOSTPTR_LIFT=1 lifts the per-part
+    // hold. While prior GPU work exists and any remaining unsubmitted part carries mutable legacy host copies, hold ahead
+    // submission so the worker runs sync_out -> sync_in in order.
+    static SEL cachedPriorSel;
+    SEL priorSel = __atomic_load_n(&cachedPriorSel, __ATOMIC_RELAXED);
+    if (!priorSel) {
+        priorSel = sel_registerName("nvmtlHasPriorQueueWork");
+        __atomic_store_n(&cachedPriorSel, priorSel, __ATOMIC_RELAXED);
+    }
+    BOOL priorWork = _parts.count > 1 ||
+        ([self respondsToSelector:priorSel] && ((BOOL (*)(id, SEL))[self methodForSelector:priorSel])(self, priorSel));
+    if (priorWork) {
+        for (NSUInteger i = _nextSubmit; i < _parts.count; i++) {
+            NVMTLSubmissionPart *pending = _parts[i];
+            if (![pending isKindOfClass:[NVMTLSubmissionPart class]]) continue;
+            if (pending->claimed) return NO;
+            nvmtl_prepare_submission_copies(pending);
+            if (pending->hasHostCopies) return NO;
+        }
+    }
     while (_nextSubmit < _parts.count) {
         if (atomic_load(&gsub_inflight) >= nvmtl_gsub_cap()) return NO;
         NVMTLSubmissionPart *part = _parts[_nextSubmit];
@@ -674,7 +746,6 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
         nvmtl_inflight *f = nvmtl_vk_inflight_new();
         if (!f) return NO;
         for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
-        [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         const int r = nvmtl_vk_submit_begin(&part->commands, f);
         _nextSubmit++;
@@ -683,6 +754,7 @@ static void nvmtl_prepare_submission_copies(NVMTLSubmissionPart *part) {
             part->aheadFailed = r;
             return NO;
         }
+        [self nvmtlMarkScheduled];
         part->inflight = f;
         nvmtl_evfold_promise_part(part);
         const unsigned long long n = atomic_fetch_add(&gsub_inflight, 1) + 1;
@@ -738,22 +810,27 @@ static void nvmtl_gsub_ahead_pass1(void) {
         if (!k || ((k + 1) & 0xFFF) == 0) nvlog("commit: %llu empty submission parts NOT submitted (no encoder, no resources) - each WAS a full submit + wait", k + 1);
     }
     if (part->commands.cb || ahead) {
-        [self nvmtlMarkScheduled];
         if (!_legacyKernelStart) _legacyKernelStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
         int result;
-        if (part->inflight) result = nvmtl_gsub_finish(part);
-        else if (part->aheadFailed) result = part->aheadFailed;
-        else {
+        if (part->inflight) {
+            [self nvmtlMarkScheduled];
+            result = nvmtl_gsub_finish(part);
+        } else if (part->aheadFailed) {
+            result = part->aheadFailed;
+        } else {
             nvmtl_prepare_submission_copies(part);
             for (NVMTLBuffer *buffer in part->copyInputs) nvmtl_buffer_sync_in(buffer);
             // A worker-owned part is an ordering barrier until QueueSubmit has
             // accepted it. Publish that progress before waiting on its fence so
             // the ahead lane can issue later parts in the same queue.
             nvmtl_inflight *f = nvmtl_vk_inflight_new();
-            if (!f) result = nvmtl_vk_submit_wait(&part->commands);
-            else {
+            if (!f) {
+                result = nvmtl_vk_submit_wait(&part->commands);
+                if (!result) [self nvmtlMarkScheduled];
+            } else {
                 result = nvmtl_vk_submit_begin(&part->commands, f);
                 if (!result) {
+                    [self nvmtlMarkScheduled];
                     @synchronized ([NVMTLCommandBuffer class]) {
                         if (_nextSubmit <= _nextPart) _nextSubmit = _nextPart + 1;
                         nvmtl_evfold_promise_part(part);
@@ -766,6 +843,9 @@ static void nvmtl_gsub_ahead_pass1(void) {
                 if (!result) nvmtl_vk_inflight_free(f);
             }
         }
+        // Local: a part that failed to submit still reports "scheduled" before its errored completion, as Metal (and the
+        // upstream order, which marked before submitting) does, so addScheduledHandler: blocks always run.
+        if (result) [self nvmtlMarkScheduled];
         if (result == -2) {
             if (!nvmtl_quarantined_parts) nvmtl_quarantined_parts = [NSMutableArray new];
             [nvmtl_quarantined_parts addObject:part];
@@ -779,6 +859,7 @@ static void nvmtl_gsub_ahead_pass1(void) {
             for (NVMTLTexture *texture in nvmtl_ws_part_landed(self, _nextPart, settled)) if (![texture nvmtlSurfaceOut]) published = NO;
             if (!nvmtl_ws_publish_settled(settled, self)) published = NO;
             for (NVMTLBuffer *buffer in nvmtl_submission_copies(part->resources, YES)) nvmtl_buffer_sync_out(buffer);
+            nvmtl_part_publish_host(part);
         }
         if (!published) {
             // -3: the command buffer was made after the GPU was lost. Metal reports a removed GPU as DeviceRemoved (11).

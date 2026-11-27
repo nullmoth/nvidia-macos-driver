@@ -30,6 +30,45 @@ static uint32_t *read_words(const char *path, size_t *n)
 
 int main(int argc, char **argv)
 {
+    const nvmtl_app_profile *gb = nvmtl_app_profile_for("Geekbench 7", "com.primatelabs.parkdale", NULL);
+    const nvmtl_app_profile *avx2 = nvmtl_app_profile_for("geekbench_avx2", "com.primatelabs.parkdale", NULL);
+    const nvmtl_app_profile *cli = nvmtl_app_profile_for("geekbench7", "com.primatelabs.parkdale", NULL);
+    arm("Geekbench's GUI and bundled CLI have the same compute settings",
+        gb && avx2 && cli && gb->knobs == avx2->knobs && gb->knobs == cli->knobs);
+    char bundle[256];
+    arm("Resources CLI identity comes from its enclosing app, including App Translocation",
+        nvmtl_app_bundle_path("/private/var/T/AppTranslocation/id/d/Geekbench 7.app/Contents/Resources/geekbench_avx2", bundle, sizeof bundle)
+        && !strcmp(bundle, "/private/var/T/AppTranslocation/id/d/Geekbench 7.app"));
+    arm("relative paths, loose binaries and nested resource files have no enclosing application",
+        !nvmtl_app_bundle_path("Geekbench 7.app/Contents/Resources/geekbench_avx2", bundle, sizeof bundle)
+        && !nvmtl_app_bundle_path("/tmp/geekbench_avx2", bundle, sizeof bundle)
+        && !nvmtl_app_bundle_path("/tmp/Foo.app/Contents/Resources/helper/geekbench_avx2", bundle, sizeof bundle)
+        && !nvmtl_app_bundle_path("/tmp/Foo.app/Contents/Resources/", bundle, sizeof bundle)
+        && !nvmtl_app_bundle_path("/tmp/Foo.app/Contents/Resources/geekbench_avx2", bundle, 4));
+    arm("Geekbench's name alone never changes another application's settings",
+        !nvmtl_app_profile_for("Geekbench 7", "com.example.other", NULL)
+        && !nvmtl_app_profile_for("geekbench_avx2", NULL, NULL)
+        && !nvmtl_app_profile_for("GeekbenchHelper", "com.primatelabs.parkdale", NULL));
+    arm("the user can disable the compute profile",
+        !nvmtl_app_profile_for("Geekbench 7", "com.primatelabs.parkdale", "0"));
+    if (!gb) return 1;
+    char gbrec[1024] = "";
+    clear(gb);
+    arm("normal launch applies the validated loop, import-free and boost settings",
+        nvmtl_app_profile_apply(gb, NULL, NULL, gbrec, sizeof gbrec, NULL) == 3
+        && !strcmp(getenv("METAL2VULKAN_CONVERGE_LOOP_EXIT"), "1")
+        && !strcmp(getenv("NVMTL_SYNC_IMPORT_FREE"), "large")
+        && !strcmp(getenv("NVRM_610_BOOST"), "hold"));
+    arm("all three settings are recorded for child-process cleanup",
+        strstr(gbrec, "METAL2VULKAN_CONVERGE_LOOP_EXIT=1")
+        && strstr(gbrec, "NVMTL_SYNC_IMPORT_FREE=large") && strstr(gbrec, "NVRM_610_BOOST=hold"));
+    setenv("METAL2VULKAN_CONVERGE_LOOP_EXIT", "0", 1);
+    unsigned gbkept = 0;
+    nvmtl_app_profile_apply(gb, user_says, "METAL2VULKAN_CONVERGE_LOOP_EXIT", NULL, 0, &gbkept);
+    arm("an explicit loop-exit opt-out survives the profile",
+        gbkept == 1 && !strcmp(getenv("METAL2VULKAN_CONVERGE_LOOP_EXIT"), "0"));
+    clear(gb);
+
     const nvmtl_app_profile *cp = nvmtl_app_profile_for("Cyberpunk2077", "com.cdprojektred.cyberpunk.steam", NULL);
     arm("the profile applies to the game: executable Cyberpunk2077, bundle com.cdprojektred.cyberpunk.steam", cp != NULL);
     arm("and to the GOG and App Store builds (any com.cdprojektred.cyberpunk identifier)",
@@ -133,14 +172,21 @@ int main(int argc, char **argv)
     /* the shader cache's names: every mode must be in the tag, or a lookup can be served another mode's module */
     const char *build = "sha256-0446740c8cfcb42d5322c6dd852a4891bb1c3005b00d409f33ee1e72c5b3f828";
     char prof[NVMTL_SPVCACHE_TAG_MAX], plain[NVMTL_SPVCACHE_TAG_MAX], noas[NVMTL_SPVCACHE_TAG_MAX], small[80];
-    int fit = nvmtl_spvcache_mode_tag(prof, sizeof prof, build, 1, 1, 1, 1, 1);
-    nvmtl_spvcache_mode_tag(plain, sizeof plain, build, 1, 1, 1, 0, 0);
-    nvmtl_spvcache_mode_tag(noas, sizeof noas, build, 1, 1, 0, 1, 1);
+    int fit = nvmtl_spvcache_mode_tag(prof, sizeof prof, build, 1, 1, 1, 1, 1, 0);
+    nvmtl_spvcache_mode_tag(plain, sizeof plain, build, 1, 1, 1, 0, 0, 0);
+    nvmtl_spvcache_mode_tag(noas, sizeof noas, build, 1, 1, 0, 1, 1, 0);
     arm("the game's cache tag names every mode: <build>-u2-p5-as1-np-nf", fit && strlen(prof) > 16 && !strcmp(prof + strlen(prof) - 16, "-u2-p5-as1-np-nf"));
     arm("the old 80-byte tag buffer could not hold it (it kept \"-u2-p5-a\" and lost the rest): refused, not cut",
-        !nvmtl_spvcache_mode_tag(small, sizeof small, build, 1, 1, 1, 1, 1));
+        !nvmtl_spvcache_mode_tag(small, sizeof small, build, 1, 1, 1, 1, 1, 0));
     arm("with and without the profile's translator switches the tags differ", strcmp(prof, plain) != 0);
     arm("with and without argument-buffer samplers the tags differ", strcmp(prof, noas) != 0);
+    {
+        char normalized[NVMTL_SPVCACHE_TAG_MAX], expected[NVMTL_SPVCACHE_TAG_MAX];
+        snprintf(expected, sizeof expected, "%s-le1", prof);
+        arm("loop exit normalization has a distinct shader cache key",
+            nvmtl_spvcache_mode_tag(normalized, sizeof normalized, build, 1, 1, 1, 1, 1, 1)
+            && !strcmp(normalized, expected));
+    }
     {
         char dir[] = "/tmp/test_app_profile_spv_XXXXXX"; int okdir = mkdtemp(dir) != NULL;
         char a1[512], a2[512];
