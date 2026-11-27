@@ -137,6 +137,11 @@ pub const REGISTRY: &[EnvVar] = &[
         effect: "trace exact structured-plan rejection points and plan flags (byte-neutral)",
     },
     EnvVar {
+        name: "METAL2VULKAN_CONVERGE_LOOP_EXIT",
+        default: "off",
+        effect: "set to 1 to enable experimental short-circuit loop exit convergence",
+    },
+    EnvVar {
         name: "METAL2VULKAN_CONVERGE_INLOOP",
         default: "off",
         effect:
@@ -311,6 +316,9 @@ pub fn flm_why() -> bool {
 }
 pub fn reloop_why() -> bool {
     present("METAL2VULKAN_RELOOP_WHY")
+}
+pub fn converge_loop_exit() -> bool {
+    std::env::var("METAL2VULKAN_CONVERGE_LOOP_EXIT").as_deref() == Ok("1")
 }
 pub fn converge_inloop() -> bool {
     present("METAL2VULKAN_CONVERGE_INLOOP")

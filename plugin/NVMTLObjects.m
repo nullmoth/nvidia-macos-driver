@@ -78,6 +78,18 @@ static MTLDataType nvmtl_air_fc_type(NSString *t) {
 static void nvmtl_buffer_sync_in(NVMTLBuffer *b);
 @class NVMTLCommandBuffer;
 static void nvmtl_buffer_sync_out(NVMTLBuffer *b);
+// Local managed NoCopy owned staging: an unimportable caller range gets owned coherent staging as its managed shadow
+// (!_swc), and the caller's pointer stays the CPU view.
+static BOOL nvmtl_owned_host_shadow(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_storage == MTLStorageModeManaged && b->_hostPtr && b->_shadow.map
+        && !b->_shadow.imported && !b->_b.map;
+}
+#define NVMTL_OWNED_HOST_SHADOW_HELPERS 1
+static const void *const nvmtl_host_pubs_key = &nvmtl_host_pubs_key;
+static inline BOOL nvmtl_owned_host_shadow_buf(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map;
+}
+static void nvmtl_part_publish_host(id part);
 static void nvbt(const char *tag, int *count, int max) {
     if (*count >= max) return; (*count)++;
     extern const char *nvmtl_log_path(void);
@@ -229,10 +241,18 @@ static void nvmtl_conf_settle(void)
     done = 1;
     unsigned forgot = nvmtl_conf_forget_inherited();
     const char *me = getprogname();
-    // The main bundle's identifier; a process outside any bundle has none and gets no profile.
+    // The main bundle's identifier, including a bundled CLI in Contents/Resources.
     char bid[256] = "";
     { CFBundleRef mb = CFBundleGetMainBundle(); CFStringRef s = mb ? CFBundleGetIdentifier(mb) : NULL;
       if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0; }
+    if (!bid[0]) {
+        char path[PROC_PIDPATHINFO_MAXSIZE], root[PROC_PIDPATHINFO_MAXSIZE];
+        if (proc_pidpath(getpid(), path, sizeof path) > 0 && nvmtl_app_bundle_path(path, root, sizeof root)) {
+            NSString *identifier = [NSBundle bundleWithPath:@(root)].bundleIdentifier;
+            const char *value = identifier.UTF8String;
+            if (value && strlen(value) < sizeof bid) strcpy(bid, value);
+        }
+    }
     const nvmtl_app_profile *p = nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"));
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
@@ -315,8 +335,8 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     return (__bridge_transfer NSMutableSet *)CFSetCreateMutable(kCFAllocatorDefault, (CFIndex)cap, &cb);
 }
 @implementation NVMTLResSet
-- (instancetype)init { if ((self = [super init])) _s = nvmtl_identity_set(0); return self; }
-- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) _s = nvmtl_identity_set(n); return self; }
+- (instancetype)init { if ((self = [super init])) { _s = nvmtl_identity_set(0); _w = nvmtl_identity_set(0); } return self; }
+- (instancetype)initWithCapacity:(NSUInteger)n { if ((self = [super init])) { _s = nvmtl_identity_set(n); _w = nvmtl_identity_set(n); } return self; }
 // 10-07 (a user's crash report, RTX 5060 Ti): Hackintool died in -[__NSSetM member:] under -addObject:, called
 // from setFragmentTexture on CoreAnimation's async-render workqueue thread. NSMutableSet is not thread-safe and nothing
 // here serialised it, so every operation now holds _lk. Enumeration hands out a snapshot, never the live set.
@@ -340,24 +360,33 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
     // driver, that both misses the bug and invents one, is worse than no test.
     id member = [_s member:o]; BOOL had = member != nil;
     if (!had) { [_s addObject:o]; member = o; }
+    [_w addObject:member];
     // An equal object need not be the object retained by NSMutableSet. Cache only the retained member's address.
     _mru[_mruNext++ & 7] = (__bridge const void *)member;
     os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (void)addReadOnlyObject:(id)o { if (!o) return; const void *p = (__bridge const void *)o; os_unfair_lock_lock(&_lk);
+    for (unsigned k = 0; k < 8; k++) if (_mru[k] == p) { os_unfair_lock_unlock(&_lk); return; }
+    id member = [_s member:o]; BOOL had = member != nil;
+    if (!had) [_s addObject:o];
+    os_unfair_lock_unlock(&_lk); if (!had) nvmtl_resref(o, 1); }
+- (BOOL)isWrittenObject:(id)o { if (!o) return NO; os_unfair_lock_lock(&_lk);
+    BOOL w = [_w member:o] != nil; os_unfair_lock_unlock(&_lk); return w; }
 - (void)removeObject:(id)o { if (!o) return; os_unfair_lock_lock(&_lk); id member = [_s member:o];
-    if (member) [_s removeObject:member];
+    if (member) { [_s removeObject:member]; [_w removeObject:member]; }
     for (unsigned k = 0; k < 8; k++) if (_mru[k] == (__bridge const void *)member) _mru[k] = NULL;
     os_unfair_lock_unlock(&_lk); if (member) nvmtl_resref(member, -1); }
 // Clearing, copying and sealing never go through -allObjects. That array is autoreleased into the CALLER's pool, and
 // these run on the app's own commit thread: Geekbench 7 never drains that pool, so every resource a command buffer had
 // ever touched stayed alive, and Super Resolution filled VRAM with 9 MB MPS buffers until allocations were refused.
 // The sets below are owned (+1) and released at the end of scope.
-- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *old;
-    os_unfair_lock_lock(&_lk); old = _s; _s = fresh; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+- (void)removeAllObjects { NSMutableSet *fresh = nvmtl_identity_set(0), *freshW = nvmtl_identity_set(0), *old, *oldW;
+    os_unfair_lock_lock(&_lk); old = _s; oldW = _w; _s = fresh; _w = freshW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    (void)oldW;
     for (id o in old) nvmtl_resref(o, -1); }
 - (id)copyWithZone:(NSZone *)z { atomic_fetch_add(&gRes2Tick, 1);
     NVMTLResSet *c = [NVMTLResSet new];
-    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy]; os_unfair_lock_unlock(&_lk);
-    c->_s = m;
+    os_unfair_lock_lock(&_lk); NSMutableSet *m = [_s mutableCopy], *mw = [_w mutableCopy]; os_unfair_lock_unlock(&_lk);
+    c->_s = m; c->_w = mw;
     for (id o in m) nvmtl_resref(o, 1);
     return c; }
 - (id)mutableCopyWithZone:(NSZone *)z { return [self copyWithZone:z]; }
@@ -366,10 +395,43 @@ static NSMutableSet *nvmtl_identity_set(NSUInteger cap) {
 // being in the part: the command buffer stopped holding it while the GPU work still used it. Membership moves to one
 // new owner, so each resource's residency count is unchanged; the new set's -dealloc gives it back.
 - (NVMTLResSet *)nvmtlTakeAll { atomic_fetch_add(&gRes2Tick, 1);
-    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s;
-    os_unfair_lock_lock(&_lk); taken->_s = _s; _s = empty; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
+    NVMTLResSet *taken = [NVMTLResSet new]; NSMutableSet *empty = taken->_s, *emptyW = taken->_w;
+    os_unfair_lock_lock(&_lk); taken->_s = _s; taken->_w = _w; _s = empty; _w = emptyW; memset(_mru, 0, sizeof _mru); os_unfair_lock_unlock(&_lk);
     return taken; }
+// After a seal that goes on recording hands the part's members back through -addObject: (all of them marked written):
+// the members the part only read become read-only again. Each also leaves the MRU: -addObject: returns early on an MRU
+// hit, so a write binding of it after the event boundary would otherwise stay read-only, its sync-out would be skipped
+// and the CPU would never see the GPU's write.
+- (void)nvmtlSyncWrittenFrom:(NVMTLResSet *)src {
+    if (!src) return;
+    os_unfair_lock_lock(&src->_lk); NSMutableSet *ms = [src->_s copy], *mw = [src->_w copy]; os_unfair_lock_unlock(&src->_lk);
+    os_unfair_lock_lock(&_lk);
+    for (id o in ms) {
+        if ([mw member:o]) continue;
+        id member = [_s member:o];
+        [_w removeObject:o];
+        for (unsigned k = 0; k < 8; k++)
+            if (_mru[k] == (__bridge const void *)o || (member && _mru[k] == (__bridge const void *)member)) _mru[k] = NULL;
+    }
+    os_unfair_lock_unlock(&_lk);
+}
 - (void)dealloc { for (id o in _s) nvmtl_resref(o, -1); }
+@end
+@interface NVMTLResSet (SubmissionCopyQuery)
+- (BOOL)nvmtlIsBufferWritten:(id)buf;
+- (BOOL)nvmtlHasMutableHostCopy:(id)buf;
+@end
+@implementation NVMTLResSet (SubmissionCopyQuery)
+- (BOOL)nvmtlIsBufferWritten:(id)buf {
+    if (![buf isKindOfClass:[NVMTLBuffer class]]) return YES;
+    NVMTLBuffer *b = buf;
+    return [self isWrittenObject:b] || b->_texSeen;
+}
+- (BOOL)nvmtlHasMutableHostCopy:(id)buf {
+    if (![buf isKindOfClass:[NVMTLBuffer class]]) return YES;
+    NVMTLBuffer *b = buf;
+    return b->_everGpuWritten || b->_texSeen || [self isWrittenObject:b];
+}
 @end
 
 static BOOL nvmtl_purge_eligible(NVMTLTexture *t) {
@@ -1080,15 +1142,20 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_b.buf && nvmtl_trace_on()) nvtrace("BUFFREE 0x%llx len %zu", (unsigned long long)nvmtl_vk_buffer_address(&_b), _b.size);
     for (uint32_t k = 0; k < _nbpk; k++) nvmtl_vk_image_destroy(&_bpk[k].img);
     free(_bpk); _bpk = NULL; _nbpk = 0;
+    // Retire clears the buffer descriptors (parked or destroyed): take the no-copy caller pointer and length first, or
+    // the deallocator receives (NULL, 0) for an imported buffer.
+    void *hostForDealloc = _hostPtr ?: (_shadow.imported ? _shadow.map : _b.map);
+    const NSUInteger hostLength = (NSUInteger)(_hostLen ?: _b.size);
+    if (_hostDealloc) { _b.sync_free = 1; _shadow.sync_free = 1; }
     nvmtl_vk_buffer_retire(&_b); if (_shadow.buf) nvmtl_vk_buffer_retire(&_shadow);
     if (_swc) { nvmtl_swc_free((nvmtl_swc *)_swc); free(_swc); _swc = NULL; }
     if (_subHeap) { NVMTLHeap *h = _subHeap; NSUInteger c = _subCharge; _subHeap = nil; _subCharge = 0;
                     if (_subPlaced && c) { _subPlaced = NO; [h nvmtlGiveRange:_heapOffset length:c]; }
                     [h nvmtlReleaseSubAllocation:c]; }
     if (_hostDealloc) { void (^d)(void *, NSUInteger) = _hostDealloc; _hostDealloc = nil;
-                        d(_hostPtr ?: _b.map, (NSUInteger)(_hostLen ?: _b.size)); } }
+                        d(hostForDealloc, hostLength); } }
 - (MTLStorageMode)storageMode { return _storage; }
-- (void *)contents { nvmtl_buf_settle(self); if (_swc && _hostPtr) return _hostPtr; return _shadow.map ? _shadow.map : (_hostPtr ? _hostPtr : _b.map); }
+- (void *)contents { nvmtl_buf_settle(self); return _hostPtr ? _hostPtr : (_shadow.map ? _shadow.map : _b.map); }
 - (id<MTLHeap>)heap { return _heap ?: _subHeap; }
 - (NSUInteger)heapOffset { return _heapOffset; }
 - (NSUInteger)length { return _b.size; }
@@ -1098,7 +1165,11 @@ void nvmtl_vk_buffer_retire(nvk_buffer *b);
     if (_shadow.map) {
         if (r.location >= _b.size) return;
         NSUInteger n = MIN(r.length, _b.size - r.location);
-        if (n) nvmtl_managed_mark(self, r.location, r.location + n);
+        if (n) {
+            if (nvmtl_owned_host_shadow(self))
+                memcpy((char *)_shadow.map + r.location, (const char *)_hostPtr + r.location, n);
+            nvmtl_managed_mark(self, r.location, r.location + n);
+        }
         return;
     }
     nvmtl_buffer_sync_in(self); }
@@ -3731,15 +3802,78 @@ static void nvmtl_hz_render_writes(NVMTLCommandBuffer *cb, NVMTLRenderPipelineSt
     if (ok) memcpy(c->hz_tmask, p->_p.gmask, sizeof c->hz_tmask);
     c->hz_wm_dirty = 1;
 }
+// Verify SPIR-V module-level writability independently of AIR text reflection (reflect_sanitized).
+// A compute buffer slot may skip post-submit sync_out ONLY when the translated SPIR-V uses Logical
+// addressing (OpMemoryModel AddressingModel == 0, never PhysicalStorageBuffer64 == 5348), uses no
+// decoration groups or BufferAddressTable (binding 640), and carries OpDecorate NonWritable (24)
+// from footprint::Analyzer on every set-0/1 StorageBuffer (12) OpVariable bound at that slot.
+static uint32_t nvmtl_spirv_writable_buffers(const void *p, size_t n) {
+    if (!p || (n & 3u) || n < 20) return 0xffffffffu;
+    const uint32_t *w = (const uint32_t *)p;
+    const size_t nw = n >> 2;
+    const uint32_t bound = w[3];
+    if (w[0] != 0x07230203u || !bound || bound > (1u << 22)) return 0xffffffffu;
+    uint32_t *bind = (uint32_t *)calloc(bound, sizeof *bind);
+    uint8_t *flags = (uint8_t *)calloc(bound, 1);   // 1: has Binding, 2: NonWritable, 4: set 2/3 (heap/fbfetch)
+    if (!bind || !flags) { free(bind); free(flags); return 0xffffffffu; }
+    int sawMemModel = 0, ok = 1;
+    uint32_t wr = 0;
+    for (size_t i = 5; i < nw; ) {
+        const uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (!wc || i + wc > nw) { ok = 0; break; }
+        if (op == 54) break;   // first OpFunction: header, capabilities, memory model, annotations, and globals precede this
+        if (op == 14) {        // OpMemoryModel
+            if (wc != 3 || w[i + 1] != 0) { ok = 0; break; }   // require Logical (0); PhysicalStorageBuffer64 (5348) -> write-all
+            sawMemModel = 1;
+        } else if (op == 74 || op == 75) {   // OpGroupDecorate / OpGroupMemberDecorate
+            ok = 0; break;
+        } else if (op == 71 && wc >= 3 && w[i + 1] < bound) {   // OpDecorate
+            const uint32_t id = w[i + 1], dec = w[i + 2];
+            if (dec == 24 && wc == 3) flags[id] |= 2u;
+            else if (dec == 33 && wc == 4) { bind[id] = w[i + 3]; flags[id] |= 1u; }
+            else if (dec == 34 && wc == 4 && (w[i + 3] == 2 || w[i + 3] == 3)) flags[id] |= 4u;
+        } else if (op == 59 && wc >= 4) {   // global OpVariable: w[i+1]=ResultType, w[i+2]=ResultId, w[i+3]=StorageClass
+            const uint32_t id = w[i + 2], sc = w[i + 3];
+            if (id >= bound) { ok = 0; break; }
+            if (sc == 12 && !(flags[id] & 4u)) {   // StorageBuffer in stage descriptor set (0/1)
+                if (!(flags[id] & 1u)) { ok = 0; break; }
+                const uint32_t b = bind[id];
+                if (b < 32) {
+                    if (!(flags[id] & 2u)) wr |= 1u << b;
+                } else if (b != 641u) {   // 641 = promoted read-only GL uniform; 640 (BufferAddressTable) or other -> write-all
+                    ok = 0; break;
+                }
+            }
+        }
+        i += wc;
+    }
+    free(bind);
+    free(flags);
+    return (ok && sawMemModel) ? wr : 0xffffffffu;
+}
+static uint32_t nvmtl_ps_writable_buffers(NVMTLComputePipelineState *ps) {
+    static int forceAll = -1;
+    if (forceAll < 0) { const char *e = getenv("NVMTL_COMPUTE_WRITE_ALL"); forceAll = e && e[0] == '1'; }
+    if (forceAll || !ps || ps->_sassKernel) return 0xffffffffu;
+    if (!__atomic_load_n(&ps->_syncReady, __ATOMIC_ACQUIRE)) {
+        const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
+        NSData *spv = [ps->_function isKindOfClass:[NVMTLFunction class]] ? ps->_function->_spirv : nil;
+        ps->_syncBuf = f.buf | nvmtl_spirv_writable_buffers(spv.bytes, spv.length);
+        __atomic_store_n(&ps->_syncReady, 1, __ATOMIC_RELEASE);
+    }
+    return ps->_syncBuf;
+}
 static void nvmtl_hz_compute_writes(NVMTLCommandBuffer *cb, NVMTLComputePipelineState *ps) {
     nvk_cmdbuf *c = &cb->_c;
     nvmtl_hz_writes w = kNVMTLHzAll;
     if (ps) {
         if (!__atomic_load_n(&ps->_hzReady, __ATOMIC_ACQUIRE)) {
             const nvmtl_hz_writes f = nvmtl_hz_fn_writes(ps->_function);
-            ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex); __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
+            ps->_hzBuf = f.buf; memcpy(ps->_hzTex, f.tex, sizeof f.tex);
+            __atomic_store_n(&ps->_hzReady, 1, __ATOMIC_RELEASE);
         }
-        w.buf = ps->_hzBuf; memcpy(w.tex, ps->_hzTex, sizeof w.tex);
+        w.buf = ps->_hzBuf;
+        memcpy(w.tex, ps->_hzTex, sizeof w.tex);
     }
     c->hz_bufw[0] = w.buf; c->hz_bufw[1] = 0;
     memcpy(c->hz_texw[0], w.tex, sizeof w.tex); memset(c->hz_texw[1], 0, sizeof c->hz_texw[1]);
@@ -6107,11 +6241,13 @@ static void nvmtl_g79_flush(NVMTLCommandBuffer *cb) {
     // usage wins. An indirect dispatch reaches them only through argument buffers, so nothing else moves them into the
     // layout a shader access needs; see nvmtlPrepareIndirectImages.
     NSMutableDictionary *_indirectImages;
-    NSData *_e78Key;
+    id _e78Key;
+    NSUInteger _tgFastIdx, _tgFastLen;
     NVMTLComputePipelineState *_e78VarFor, *_e78VarSel;
     NSUInteger _e78NDisp; BOOL _e78Concurrent, _e78Loose;
     BOOL _g79Bar;
 }
+- (void)nvmtlMarkWrittenBuffers;
 @end
 enum { NVMTL_E78_RING = 64 * 1024, NVMTL_E78_RING_ALIGN = 256, NVMTL_E78_RING_MAX = 16 * 1024 };
 static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, size_t *off) {
@@ -6526,9 +6662,13 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
     if ((_samplers.count || _tgLen.count) && _e78VarSel && _e78VarFor == _ps && nvmtl_enc78_on(NVMTL_E78_H5)) {
         selected = _e78VarSel; nvmtl_enc78_count(E78C_VARHIT, 1);
     } else if (_samplers.count || _tgLen.count) {
-        if (!_e78Key || !nvmtl_enc78_on(NVMTL_E78_H5))
-            _e78Key = [NSJSONSerialization dataWithJSONObject:@{@"s": _samplers ?: @{}, @"tg": _tgLen ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
-        NSData *key = _e78Key;
+        if (!_e78Key || !nvmtl_enc78_on(NVMTL_E78_H5)) {
+            if (_samplers.count == 0 && _tgLen.count == 1 && _tgFastIdx < 0x7FFFu && _tgFastLen < (1ull << 40))
+                _e78Key = @((((uint64_t)(_tgFastIdx + 1u)) << 40) | (uint64_t)_tgFastLen);
+            else
+                _e78Key = [NSJSONSerialization dataWithJSONObject:@{@"s": _samplers ?: @{}, @"tg": _tgLen ?: @{}} options:NSJSONWritingSortedKeys error:NULL];
+        }
+        id key = _e78Key;
         nvmtl_enc78_count(E78C_VARMISS, 1);
         @synchronized (_ps) {
             if (!_ps->_samplerVariants) _ps->_samplerVariants = [NSMutableDictionary new];
@@ -6540,6 +6680,12 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
                 NSData *spirv = nvmtl_translate_variant(_ps->_function, _samplers, _tgLen, &why);
                 if (spirv) {
                     selected = [NVMTLComputePipelineState new];
+                    selected->_function = _ps->_function;
+                    selected->_hzBuf = _ps->_hzBuf;
+                    memcpy(selected->_hzTex, _ps->_hzTex, sizeof _ps->_hzTex);
+                    selected->_hzReady = _ps->_hzReady;
+                    selected->_syncBuf = nvmtl_ps_writable_buffers(_ps) | nvmtl_spirv_writable_buffers(spirv.bytes, spirv.length);
+                    selected->_syncReady = 1;
                     if (nvmtl_vk_compute_pipeline_create(spirv.bytes, spirv.length, &selected->_p)) {
                         selected = nil; why = @"Vulkan compute pipeline creation failed";
                     }
@@ -6560,6 +6706,14 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
             }
         }
         _e78VarFor = _ps; _e78VarSel = selected;
+    }
+    if (selected != _ps && _cb && _cb->_resources) {
+        uint32_t extra = selected->_syncBuf & ~nvmtl_ps_writable_buffers(_ps);
+        while (extra) {
+            const unsigned k = (unsigned)__builtin_ctz(extra);
+            extra &= extra - 1u;
+            if (_baN[k] == 2 && _baObj[k]) [_cb->_resources addObject:_baObj[k]];
+        }
     }
     nvmtl_retain_resource(_cb, selected);
     nvmtl_bind_embedded_enc(_cb, NVMTL_SET_VERTEX, _ps->_function, self);
@@ -6615,8 +6769,10 @@ static int nvmtl_zprobe_on(void);
         return;
     }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    // the same buffer at the same index of this encoder is already held by the command buffer's set
-    if (i >= NVMTL_NBUFAT || _baObj[i] != (id)nb) [_cb->_resources addObject:nb];
+    // Bound buffers start read-only in the command buffer's set and are promoted to written at dispatch time only for
+    // slots the pipeline's reflection may write (nvmtlMarkWrittenBuffers).
+    if (i >= NVMTL_NBUFAT) [_cb->_resources addObject:nb];
+    else if (_baObj[i] != (id)nb) [(NVMTLResSet *)_cb->_resources addReadOnlyObject:nb];
     if (i < NVMTL_NBUFAT) { _baObj[i] = nb; _baOff[i] = off; _baN[i] = 2; }
     if (nvmtl_hz_bind_buffer(&_cb->_c, nvmtl_hz_untracked_buf(nb), NVMTL_SET_VERTEX, (uint32_t)i, &nb->_b, off)) nvlog("compute setBuffer: bind FAILED");
     if (nvmtl_zprobe_on()) {
@@ -6804,7 +6960,18 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     while (out[0] * out[1] * out[2] > 128 && out[2] % 2 == 0) out[2] /= 2;
     while (out[0] * out[1] * out[2] > 128 && out[0] > 32 && out[0] % 2 == 0) out[0] /= 2;
 }
+- (void)nvmtlMarkWrittenBuffers {
+    if (!_cb) return;
+    if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+    uint32_t m = nvmtl_ps_writable_buffers(_ps);
+    while (m) {
+        const unsigned k = (unsigned)__builtin_ctz(m);
+        m &= m - 1u;
+        if (_baN[k] == 2 && _baObj[k]) [_cb->_resources addObject:_baObj[k]];
+    }
+}
 - (void)dispatchThreadgroups:(MTLSize)grid threadsPerThreadgroup:(MTLSize)tg {
+    [self nvmtlMarkWrittenBuffers];
     if (_ps && _ps->_sassKernel) {
         int ran = nvmtl_sass_dispatch(self, grid, tg, 0, !_ps->_sassOnly);
         if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
@@ -6830,6 +6997,7 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     if (_cb->_stTwins.count) nvmtl_storage_twins_out(_cb);
 }
 - (void)dispatchThreads:(MTLSize)threads threadsPerThreadgroup:(MTLSize)tg {
+    [self nvmtlMarkWrittenBuffers];
     if (_ps && _ps->_sassKernel) {
         int ran = nvmtl_sass_dispatch(self, threads, tg, 1, !_ps->_sassOnly);
         if (ran) { if (ran > 0 && _cb->_stTwins.count) nvmtl_storage_twins_out(_cb); return; }
@@ -6868,11 +7036,25 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
                          (unsigned long)w, (unsigned long)h);
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)len atIndex:(NSUInteger)i {
+    static NSString *const kSmallIdx[16] = {
+        @"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7",
+        @"8", @"9", @"10", @"11", @"12", @"13", @"14", @"15"
+    };
     if (!_tgLen) _tgLen = [NSMutableDictionary new];
     if (nvmtl_zprobe_on()) nvlog("ZENC tgMemory   idx %-3lu length %lu", (unsigned long)i, (unsigned long)len);
-    NSUInteger was = [_tgLen[@(i).stringValue] unsignedIntegerValue];
-    if (len) _tgLen[@(i).stringValue] = @(len);
-    else     [_tgLen removeObjectForKey:@(i).stringValue];
+    NSString *key = i < 16 ? kSmallIdx[i] : @(i).stringValue;
+    NSUInteger was = [_tgLen[key] unsignedIntegerValue];
+    if (len) {
+        _tgLen[key] = @(len);
+        if (_tgLen.count == 1) { _tgFastIdx = i; _tgFastLen = len; }
+    } else {
+        [_tgLen removeObjectForKey:key];
+        if (_tgLen.count == 1) {
+            NSString *only = _tgLen.allKeys.firstObject;
+            _tgFastIdx = (NSUInteger)only.integerValue;
+            _tgFastLen = [_tgLen[only] unsignedIntegerValue];
+        }
+    }
     if (was != len) { _e78Key = nil; _e78VarSel = nil; }
 }
 // GPU-encoded dispatches (NVMTL_GPU_ICB=1). The threadgroup size a kernel recorded is only in the GPU record, and Vulkan needs it when the
@@ -7003,7 +7185,11 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
                          threadsPerThreadgroup:(MTLSize)tg {
     NVMTLBuffer *nb = (NVMTLBuffer *)buf;
     if (!nb) { nvlog("dispatchThreadgroupsWithIndirectBuffer: nil"); return; }
-    nvmtl_retain_resource(_cb, nb);
+    if (_cb) {
+        if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+        [(NVMTLResSet *)_cb->_resources addReadOnlyObject:nb];
+    }
+    [self nvmtlMarkWrittenBuffers];
     // a pipeline with only compiled machine code has no Vulkan pipeline to run an indirect dispatch on
     if (_ps && _ps->_sassOnly) {
         [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
@@ -7043,7 +7229,12 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     return YES;
 }
 - (void)useResource:(id<MTLResource>)r usage:(MTLResourceUsage)u {
-    nvmtl_retain_resource(_cb, r);
+    if (r && _cb && [(id)r isKindOfClass:[NVMTLBuffer class]] && !(u & MTLResourceUsageWrite)) {
+        if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
+        [(NVMTLResSet *)_cb->_resources addReadOnlyObject:r];
+    } else {
+        nvmtl_retain_resource(_cb, r);
+    }
     nvmtl_hz_use(_cb, r, u);
     if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = (NVMTLTexture *)r;
@@ -7128,7 +7319,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *s = (NVMTLBuffer *)src, *d = (NVMTLBuffer *)dst;
     if (!s || !d) { nvlog("blit copyFromBuffer: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:s];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:s];
     [_cb->_resources addObject:d];
     if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &s->_b, so, &d->_b, dof, size)) nvlog("blit copyFromBuffer: FAILED");
 }
@@ -7287,7 +7478,7 @@ static BOOL nvmtl_rb_root(NVMTLTexture *t) { return t && (t->_parent ?: t)->_rbS
     NVMTLBuffer *b = (NVMTLBuffer *)src; NVMTLTexture *t = (NVMTLTexture *)dst;
     if (!b || !t) { nvlog("blit copyFromBuffer:toTexture: nil"); return; }
     if (!_cb->_resources) _cb->_resources = [NVMTLResSet new];
-    [_cb->_resources addObject:b];
+    [(NVMTLResSet *)_cb->_resources addReadOnlyObject:b];
     [_cb->_resources addObject:t];
     if (nvmtl_rb_root(t) && [t nvi]->mtl_type != 7 && size.depth == 1) {   // buffer bytes are Metal's BGR10A2 layout
         NVMTLTexture *tmp = nvmtl_rb_temp(_cb, t.device, size.width, size.height);
@@ -7405,6 +7596,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
         if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &b->_b, 0, &b->_shadow, 0, b->_b.size))
             [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                 userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer synchronization"}]];
+        else if (nvmtl_owned_host_shadow(b)) {
+            if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+            [_cb->_hostPublications addObject:b];
+        }
     }
     if ([(id)r isKindOfClass:[NVMTLTexture class]]) {
         NVMTLTexture *t = (NVMTLTexture *)r;
@@ -7415,6 +7610,10 @@ destinationBytesPerImage:(NSUInteger)img options:(MTLBlitOption)opt {
             if (nvmtl_vk_cmd_copy_buffer(&_cb->_c, &bb->_b, 0, &bb->_shadow, 0, bb->_b.size))
                 [_cb nvmtlRecordEncodingError:[NSError errorWithDomain:MTLCommandBufferErrorDomain code:MTLCommandBufferErrorInternal
                     userInfo:@{NSLocalizedDescriptionKey:@"Cannot encode managed buffer-texture synchronization"}]];
+            else if (nvmtl_owned_host_shadow(bb)) {
+                if (!_cb->_hostPublications) _cb->_hostPublications = [NSMutableSet new];
+                [_cb->_hostPublications addObject:bb];
+            }
         }
     }
 }
@@ -8835,4 +9034,25 @@ static void nvmtl_buffer_sync_out(NVMTLBuffer *b)
     const uint64_t t0 = nvmtl_perf_now();
     memcpy(b->_hostPtr, b->_b.map, b->_hostLen);
     nvmtl_perf_note(NVP_SYNCOUT, t0, b->_hostLen);
+}
+
+#import <objc/runtime.h>
+#ifndef NVMTL_OWNED_HOST_SHADOW_HELPERS
+static const void *const nvmtl_host_pubs_key = &nvmtl_host_pubs_key;
+// Owned managed NoCopy staging (!b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map): published to the caller's
+// pages only by the exact submission part that encoded its synchronizeResource: GPU->staging copy.
+static inline BOOL nvmtl_owned_host_shadow_buf(NVMTLBuffer *b) {
+    return b && !b->_swc && b->_hostPtr && b->_shadow.map && !b->_b.map;
+}
+#endif
+static void nvmtl_buffer_publish_host(NVMTLBuffer *b) {
+    if (!nvmtl_owned_host_shadow_buf(b)) return;
+    const size_t n = MIN(b->_hostLen, MIN(b->_b.size, b->_shadow.size));
+    const uint64_t t0 = nvmtl_perf_now();
+    if (n) memcpy(b->_hostPtr, b->_shadow.map, n);
+    nvmtl_perf_note(NVP_SYNCOUT, t0, n);
+}
+static void nvmtl_part_publish_host(id part) {
+    NSSet *pubs = part ? objc_getAssociatedObject(part, nvmtl_host_pubs_key) : nil;
+    for (NVMTLBuffer *b in pubs) nvmtl_buffer_publish_host(b);
 }

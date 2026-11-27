@@ -483,6 +483,12 @@ impl Emitter {
         let mut body_blocks =
             crate::native::tir::prune_literal_branch_dead_blocks(switch_ready_blocks);
         body_blocks = crate::native::tir::prune_unused_geps(body_blocks);
+        if crate::env_vars::converge_loop_exit()
+            && crate::native::cfg::converge_loop_exit::converge_loop_exit(&mut body_blocks, &f.params)
+            && crate::env_vars::reloop_why()
+        {
+            eprintln!("CONVERGE-LOOP-EXIT function={}", f.name);
+        }
         let buffer_params = f
             .params
             .iter()

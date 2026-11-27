@@ -88,7 +88,20 @@ static const nvmtl_app_knob nvmtl_cp2077_knobs[] = {
     { "NVMTL_WS_RT_GATE_MB", "6200" },
 };
 
+/* These three settings were validated together for Geekbench's compute workloads. Keep the desktop's defaults. */
+static const nvmtl_app_knob nvmtl_geekbench7_knobs[] = {
+    { "METAL2VULKAN_CONVERGE_LOOP_EXIT", "1" },
+    { "NVMTL_SYNC_IMPORT_FREE", "large" },
+    { "NVRM_610_BOOST", "hold" },
+};
+
 static const nvmtl_app_profile nvmtl_app_profiles[] = {
+    { .exe = "Geekbench 7", .bundle_prefix = "com.primatelabs.parkdale",
+      .knobs = nvmtl_geekbench7_knobs, .nknobs = sizeof nvmtl_geekbench7_knobs / sizeof nvmtl_geekbench7_knobs[0] },
+    { .exe = "geekbench_avx2", .bundle_prefix = "com.primatelabs.parkdale",
+      .knobs = nvmtl_geekbench7_knobs, .nknobs = sizeof nvmtl_geekbench7_knobs / sizeof nvmtl_geekbench7_knobs[0] },
+    { .exe = "geekbench7", .bundle_prefix = "com.primatelabs.parkdale",
+      .knobs = nvmtl_geekbench7_knobs, .nknobs = sizeof nvmtl_geekbench7_knobs / sizeof nvmtl_geekbench7_knobs[0] },
     /* Steam, GOG and App Store builds all carry an identifier under com.cdprojektred.cyberpunk. */
     { "Cyberpunk2077", "com.cdprojektred.cyberpunk", nvmtl_cp2077_knobs, sizeof nvmtl_cp2077_knobs / sizeof nvmtl_cp2077_knobs[0],
       NVMTL_CP2077_SHADER_FROM, NVMTL_CP2077_SHADER_TO, nvmtl_cp2077_shader_patch,
@@ -112,6 +125,22 @@ static inline const nvmtl_app_profile *nvmtl_app_profile_for(const char *exe, co
         if (!strcmp(p->exe, exe) && !strncmp(bundle_id, p->bundle_prefix, strlen(p->bundle_prefix))) return p;
     }
     return NULL;
+}
+
+/* CFBundleGetMainBundle does not identify a CLI in Contents/Resources. Its canonical executable path still identifies
+   the containing application. Callers supply the kernel's executable path, never argv[0]. */
+static inline int nvmtl_app_bundle_path(const char *executable, char *out, size_t cap)
+{
+    if (!executable || executable[0] != '/') return 0;
+    const char *base = strrchr(executable, '/');
+    const char suffix[] = ".app/Contents/Resources";
+    const size_t len = base ? (size_t)(base - executable) : 0;
+    if (!base || !base[1] || len < sizeof suffix - 1
+        || memcmp(base - (sizeof suffix - 1), suffix, sizeof suffix - 1)) return 0;
+    const size_t root = len - strlen("/Contents/Resources");
+    if (root + 1 > cap) return 0;
+    memcpy(out, executable, root); out[root] = 0;
+    return 1;
 }
 
 /* "major[.minor[.patch]]" into v; 1 when the major is a plausible macOS version (14..99). */

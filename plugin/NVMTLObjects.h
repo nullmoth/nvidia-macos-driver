@@ -39,8 +39,8 @@ static inline void nvmtl_buf_settle(NVMTLBuffer *b) {
         __atomic_store_n(&b->_zshadow, 0, __ATOMIC_RELEASE); return; }
     while (__atomic_load_n(&b->_zshadow, __ATOMIC_ACQUIRE) == 2) sched_yield();
 }
-/* a buffer with a working copy and a caller pointer (_swc and _hostPtr): the caller's pages are what the CPU sees and _shadow is only the staging for the transfers */
-static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); if (b->_swc && b->_hostPtr) return b->_hostPtr; return b->_shadow.map ? b->_shadow.map : b->_b.map; }
+/* a buffer with a caller pointer (_hostPtr): the caller's pages are what the CPU sees and _shadow (if any) is staging */
+static inline void *nvmtl_buf_cpu(NVMTLBuffer *b) { nvmtl_buf_settle(b); return b->_hostPtr ? b->_hostPtr : (b->_shadow.map ? b->_shadow.map : b->_b.map); }
 @interface NVMTLTexture : NSObject <MTLTexture> {
   @public nvk_image _i; nvk_queue *_q; IOSurfaceRef _surf; MTLPixelFormat _fmt; NSUInteger _plane;
   NVMTLHeap *_heap; NSUInteger _heapOffset;
@@ -135,6 +135,7 @@ extern id gNVMTLMainDevice;
   NSMutableArray *_handlers;
   NSMutableArray *_scratch;
   NSMutableSet *_resources;
+  NSMutableSet *_hostPublications; // owned managed staging: publish caller pages after this part finishes
   NSMutableSet *_surfDirty;
   NSMutableSet *_surfOverwrites; // contents defined by writes recorded in this command buffer
   unsigned _nEnc, _nEnd, _nHandlers, _nStatus, _nEnqueue, _nLabel, _nPresent, _nWait;
@@ -278,7 +279,7 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 @interface NVMTLBuffer () { @public NSString *_label; MTLResourceOptions _ropt;
   int _resRefs, _rstate, _lruReg, _wantOn; uint64_t _lastUse;
   uint64_t _useEp;
-  BOOL _texSeen;
+  BOOL _texSeen, _everGpuWritten;
 } @end
 @interface NVMTLTexture () { @public NSString *_label; MTLResourceOptions _ropt; BOOL _shareable; BOOL _fbo;
   MTLTextureSwizzleChannels _swz; BOOL _hasSwz; void *_swzView;
@@ -292,7 +293,10 @@ id<MTLCounterSet> nvmtl_timestamp_counter_set(void);
 } @end
 void nvmtl_texture_desc_swizzle(NVMTLTexture *t, MTLTextureDescriptor *d);
 #include <os/lock.h>
-@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+@interface NVMTLResSet : NSMutableSet { @public NSMutableSet *_s, *_w; os_unfair_lock _lk; const void *_mru[8]; unsigned _mruNext; }
+- (void)addReadOnlyObject:(id)o;
+- (BOOL)isWrittenObject:(id)o;
+- (void)nvmtlSyncWrittenFrom:(NVMTLResSet *)src;
 - (NVMTLResSet *)nvmtlTakeAll;
 @end
 @interface NVMTLFunction () { @public NSString *_label; } @end
@@ -343,7 +347,7 @@ BOOL nvmtl_air_grid_only(NVMTLFunction *fn);
 @interface NVMTLHeap () { @public MTLHazardTrackingMode _hazard; } @end
 // hazard model (nvmtl_hazard.h): which buffer slots and textures each stage of a pipeline writes, from its reflection
 @interface NVMTLRenderPipelineState () { @public int _hzReady; uint32_t _hzBuf[2]; uint64_t _hzTex[2][2]; } @end
-@interface NVMTLComputePipelineState () { @public int _hzReady; uint32_t _hzBuf; uint64_t _hzTex[2]; } @end
+@interface NVMTLComputePipelineState () { @public int _hzReady; uint32_t _hzBuf; uint64_t _hzTex[2]; int _syncReady; uint32_t _syncBuf; } @end
 @interface NVMTLIndirectCommandBuffer () { @public MTLResourceOptions _opts; } @end
 @interface NVMTLBuffer () { @public uint32_t _purge; } @end
 @interface NVMTLTexture () { @public uint32_t _purge; } @end

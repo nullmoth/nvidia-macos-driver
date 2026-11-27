@@ -296,7 +296,10 @@ static BOOL nvmtl_sass_encode(NVMTLSassKernel *kernel, NVMTLComputeCommandEncode
         .crs_size = nvmtl_sass_program_call_stack(&program),
     };
     nvmtl_retain_resource(encoder->_cb, encoder->_ps);
-    for (unsigned k = 0; k < NVMTL_NBUFAT; k++) if (encoder->_baN[k] && encoder->_baObj[k]) nvmtl_retain_resource(encoder->_cb, encoder->_baObj[k]);
+    if (!encoder->_cb->_resources) encoder->_cb->_resources = [NVMTLResSet new];
+    for (unsigned k = 0; k < NVMTL_NBUFAT; k++)
+        if (encoder->_baN[k] && encoder->_baObj[k]) [(NVMTLResSet *)encoder->_cb->_resources addReadOnlyObject:encoder->_baObj[k]];
+    [encoder nvmtlMarkWrittenBuffers];
     nvk_cmdbuf *commands = &encoder->_cb->_c;
     if (commands->in_rp) nvmtl_vk_cmd_end_render(commands);
     VkMemoryBarrier before = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
