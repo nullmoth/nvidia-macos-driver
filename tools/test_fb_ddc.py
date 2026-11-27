@@ -24,8 +24,9 @@ fixture = r'''
 #include <cstring>
 #include <vector>
 #include "nvrm_ddc_abi.h"
-typedef int IOReturn; typedef uint32_t UInt32; typedef uint32_t IOOptionBits;
-enum { kIOReturnSuccess=0, kIOReturnUnsupported=-1, kIOReturnUnsupportedMode=-2, kIOReturnBadArgument=-3, kIOReturnNoDevice=-4, kIOReturnBadArgumentX=-9 };
+#include "nvrm-fb-safety.h"
+typedef int IOReturn; typedef uint32_t UInt32; typedef uint32_t IOOptionBits; typedef uint64_t UInt64;
+enum { kIOReturnSuccess=0, kIOReturnUnsupported=-1, kIOReturnUnsupportedMode=-2, kIOReturnBadArgument=-3, kIOReturnNoDevice=-4, kIOReturnBadArgumentX=-9, kIOReturnBusy=-10, kMillisecondScale=1000 };
 enum { kIOI2CNoTransactionType=0, kIOI2CSimpleTransactionType=1, kIOI2CDDCciReplyTransactionType=2, kIOI2CUseSubAddressCommFlag=2 };
 struct IOI2CBusTiming; struct IOI2CRequest {
     IOOptionBits sendTransactionType, replyTransactionType; uint32_t sendAddress, replyAddress; uint8_t sendSubAddress, replySubAddress;
@@ -34,10 +35,20 @@ struct IOI2CBusTiming; struct IOI2CRequest {
 };
 static void absolutetime_to_nanoseconds(uint64_t a, uint64_t *n) { *n = a; }
 static unsigned gSlept; static void IOSleep(unsigned ms) { gSlept += ms; }
+static void clock_interval_to_deadline(unsigned ms, int, uint64_t *deadline) { *deadline = ms; }
+class NVRMDdcTransaction {
+    bool *flag;
+    bool acquired;
+public:
+    explicit NVRMDdcTransaction(bool *busy) : flag(busy), acquired(!__atomic_exchange_n(flag, true, __ATOMIC_ACQUIRE)) {}
+    ~NVRMDdcTransaction() { if (acquired) __atomic_store_n(flag, false, __ATOMIC_RELEASE); }
+    bool held() const { return acquired; }
+};
 struct Call { unsigned op, addr, len; std::vector<unsigned char> w; };
 static std::vector<Call> gCalls; static IOReturn gFail = 0; static std::vector<unsigned char> gReply;
 struct FB {
-    bool fDdcOn = true, fDpyLost = false; void *fKms = this;
+    bool fDdcOn = true, fDpyLost = false; void *fKms = this; bool fDdcInFlight = false; uint64_t fDdcWriteAfter = 0;
+    UInt32 fDdcSinkGeneration = 1, fDdcFastReadGeneration = 0;
     IOReturn ddcTransfer(unsigned op, unsigned addr, unsigned char *d, unsigned len) {
         Call c{op, addr, len, {}};
         if (op == kNvrmDdcWrite) c.w.assign(d, d + len); else memcpy(d, gReply.data(), len < gReply.size() ? len : gReply.size());
@@ -61,6 +72,26 @@ int main() {
     assert(gCalls[1].op == kNvrmDdcRead && gCalls[1].addr == 0x37);
     assert(gSlept >= 40);                              // the monitor gets its 40 ms before the reply is read
     assert(q.replyBytes == 11);                        // 0x88 & 0x7f = 8 payload + 3 framing bytes
+    assert(fb.fDdcWriteAfter == 140);
+    unsigned char edid[128] = {};
+    edid[8] = 0x21; edid[9] = 0x63; edid[10] = 0x51; edid[11] = 0x27;
+    assert(nvrmDdcFastBrightnessRead(edid, sizeof edid, 0x400));
+    assert(!nvrmDdcFastBrightnessRead(edid, sizeof edid, 0x800));
+    assert(!nvrmDdcFastBrightnessRead(edid, 12, 0x400));
+    edid[10] = 0x52;
+    assert(!nvrmDdcFastBrightnessRead(edid, sizeof edid, 0x400));
+    unsigned char brightness[] = {0x51, 0x82, 0x01, 0x10, 0xac};
+    auto readBrightness = [&] {
+        IOI2CRequest get = req(brightness, sizeof brightness, r, sizeof r);
+        assert(fb.doI2CRequest(0, nullptr, &get) == kIOReturnSuccess);
+        return fb.fDdcWriteAfter;
+    };
+    fb.fDdcFastReadGeneration = fb.fDdcSinkGeneration;
+    assert(readBrightness() == 140);                   // a short read cannot cut an outstanding deadline
+    fb.fDdcWriteAfter = 0;
+    assert(readBrightness() == 40);
+    ++fb.fDdcSinkGeneration;
+    assert(readBrightness() == 140);                   // an unplug invalidates the old display's timing
     // set VCP: write only, no reply, no wait
     gCalls.clear(); gSlept = 0; IOI2CRequest s = req(w, 6, nullptr, 0);
     assert(fb.doI2CRequest(0, nullptr, &s) == kIOReturnSuccess && gCalls.size() == 1 && gSlept == 0);
@@ -97,5 +128,6 @@ int main() {
 with tempfile.TemporaryDirectory() as d:
     d = pathlib.Path(d)
     (d / 't.cpp').write_text(fixture + method.replace('NVRMNVDAFramebuffer::', 'FB::').replace('struct IOI2CBusTiming *', 'IOI2CBusTiming *').replace('struct IOI2CRequest *rq', 'IOI2CRequest *rq') + checks)
-    subprocess.run(['clang++', '-std=c++17', '-Wall', f'-I{root}/kexts/NVRMFB', str(d / 't.cpp'), '-o', str(d / 't')], check=True)
+    subprocess.run(['clang++', '-std=c++17', '-Wall', f'-I{root}/kexts/NVRMFB',
+                    f'-I{root}/kexts/NVRMFB/fb', str(d / 't.cpp'), '-o', str(d / 't')], check=True)
     subprocess.run([str(d / 't')], check=True)
