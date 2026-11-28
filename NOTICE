@@ -58,7 +58,8 @@ dlss/        dlss/zstd is the Zstandard 1.5.6 reference decoder, BSD-3-Clause (l
              DLSS runtimes, NGX core and nvJitLink are downloaded by the user's Mac from NVIDIA's public sources, checked against
              pinned hashes, and stay under NVIDIA's licences (package/dlss_fetch.sh).
 
-air-runtime  LLVM (Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
+air-runtime  LLVM 21.1.8 (https://github.com/llvm/llvm-project/releases/tag/llvmorg-21.1.8,
+             Apache-2.0 with LLVM exceptions) and Zstandard (BSD-3-Clause); their licence texts are in
              NVMTLDriver.bundle/Contents/Resources/air-runtime.
 
 kexts/NVRMFB EDID override files and the opt-in smaller boot rasters follow an idea by mickys

@@ -2293,7 +2293,7 @@ declare <2 x float> @air.map_screen_to_physical_coordinates.v2f32.p2i8.i32(<2 x 
 
 #[test]
 fn native_fragment_array_size_query_extracts_array_layer_count() {
-    let ll = r#"
+    let template = r#"
 target triple = "spirv-unknown-vulkan1.2"
 define <4 x float> @frag(<4 x float> %position, ptr addrspace(1) %tex) {
 entry:
@@ -2317,25 +2317,37 @@ declare float @air.convert.f.f32.u.i32(i32)
 !4 = !{i32 0, !"air.position", !"air.center", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
 !5 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d_array<float, sample>", !"air.arg_name", !"tex"}
 "#;
-    let tmp = std::env::temp_dir().join(format!(
-        "metal2vulkan_fragment_array_size_query_{}",
-        std::process::id()
-    ));
-    let _ = std::fs::create_dir_all(&tmp);
-    let spv = crate::translate_sanitized_native(ll, Stage::Fragment, &tmp).expect("translate");
-    let asm = disassemble(&spv).expect("disassemble");
-    assert!(asm.contains("OpImageQuerySizeLod"), "{asm}");
-    assert!(
-        asm.lines()
-            .any(|line| line.contains("OpCompositeExtract") && line.ends_with(" 2")),
-        "{asm}"
-    );
-    if std::process::Command::new("spirv-val")
-        .arg("--version")
-        .output()
-        .is_ok()
-    {
-        tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+    for (family, shape) in [("texture", "2d"), ("depth", "2d"), ("depth", "cube")] {
+        let ll = template
+            .replace(
+                "air.get_array_size_texture_2d_array",
+                &format!("air.get_array_size_{family}_{shape}_array"),
+            )
+            .replace(
+                "texture2d_array<float, sample>",
+                &format!("{family}{shape}_array<float, sample>"),
+            );
+        let tmp = std::env::temp_dir().join(format!(
+            "metal2vulkan_fragment_array_size_query_{family}_{shape}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        let spv = crate::translate_sanitized_native(&ll, Stage::Fragment, &tmp).expect("translate");
+        let asm = disassemble(&spv).expect("disassemble");
+        assert!(asm.contains("OpImageQuerySizeLod"), "{asm}");
+        assert!(
+            asm.lines()
+                .any(|line| line.contains("OpCompositeExtract") && line.ends_with(" 2")),
+            "{asm}"
+        );
+        if std::process::Command::new("spirv-val")
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            tools::spirv_val_bytes(&spv, &tmp).expect("spirv-val");
+        }
+        std::fs::remove_dir_all(&tmp).expect("remove isolated scratch");
     }
 }
 
@@ -2705,4 +2717,33 @@ define TYPE @fragment_byte(TYPE %payload) {
             }
         }
     }
+}
+
+#[test]
+fn native_kernel_stage_region_loads_gpu_record_without_changing_dispatch_contract() {
+    let ll = r#"
+target triple = "spirv-unknown-vulkan1.2"
+define void @region(<3 x i32> %origin, <3 x i32> %extent, ptr addrspace(1) %out) {
+  store <3 x i32> %origin, ptr addrspace(1) %out, align 16
+  %next = getelementptr <3 x i32>, ptr addrspace(1) %out, i64 1
+  store <3 x i32> %extent, ptr addrspace(1) %next, align 16
+  ret void
+}
+!air.kernel = !{!0}
+!0 = !{ptr @region, !1, !2}
+!1 = !{}
+!2 = !{!3, !4, !5}
+!3 = !{i32 0, !"air.stage_in_grid_origin", !"air.arg_type_name", !"uint3", !"air.arg_name", !"origin"}
+!4 = !{i32 1, !"air.stage_in_grid_size", !"air.arg_type_name", !"uint3", !"air.arg_name", !"extent"}
+!5 = !{i32 2, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"uint3", !"air.arg_name", !"out"}
+"#;
+    let tmp = std::env::temp_dir().join(format!("metal2vulkan_stage_region_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let spv = crate::translate_sanitized_native(ll, Stage::Kernel, &tmp).expect("translate region-only kernel");
+    let asm = disassemble(&spv).expect("disassemble");
+    assert!(asm.contains("PhysicalStorageBuffer64"), "{asm}");
+    assert!(asm.contains("OpConvertUToPtr"), "{asm}");
+    assert!(asm.contains("Aligned 4"), "{asm}");
+    assert_eq!(crate::reflect::KERNEL_DISPATCH_PUSH_CONSTANT_SIZE, 48);
+    tools::spirv_val_bytes(&spv, &tmp).expect("GPU region pointer loads must validate");
 }

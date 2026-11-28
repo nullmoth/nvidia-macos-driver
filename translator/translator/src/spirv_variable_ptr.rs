@@ -10,6 +10,118 @@ struct AccessChainDef {
     parent_before_last: Option<Word>,
 }
 
+/// Recovered buffer pointers can expose record indexing only after resource layout selection.
+/// PtrAccessChain may not offset a Block by a nonzero Element (SPIR-V undefined behavior).
+/// Put those records in a runtime array, preserving the original pointer stride and every
+/// member decoration. Only direct member accesses are rewritten; escaping/whole-record uses
+/// and variable-sized records need earlier provenance recovery instead.
+pub(crate) fn lower_storage_buffer_record_arrays(module: &mut Module) -> usize {
+    if !module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions)
+        .any(|i| matches!(i.class.opcode, Op::PtrAccessChain | Op::InBoundsPtrAccessChain)) {
+        return 0;
+    }
+    let blocks = module.annotations.iter().filter_map(|i| match i.operands.as_slice() {
+        [Operand::IdRef(id), Operand::Decoration(spirv::Decoration::Block)]
+            if i.class.opcode == Op::Decorate => Some(*id),
+        _ => None,
+    }).collect::<HashSet<_>>();
+    if blocks.is_empty() { return 0; }
+    let mut defs = collect_defs(module);
+    let zero_constants = zero_integer_constants(&defs);
+    let mut roots = Vec::new();
+    for inst in module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions) {
+        if !matches!(inst.class.opcode, Op::PtrAccessChain | Op::InBoundsPtrAccessChain) {
+            continue;
+        }
+        let [Operand::IdRef(base), Operand::IdRef(element), ..] = inst.operands.as_slice() else { continue };
+        if zero_constants.contains(element) || roots.contains(base) { continue; }
+        let Some(var) = defs.get(base) else { continue };
+        let Some((StorageClass::StorageBuffer, ty)) = var.result_type.and_then(|p| ptr_info(&defs, p)) else { continue };
+        if var.class.opcode == Op::Variable && blocks.contains(&ty) { roots.push(*base); }
+    }
+    if roots.is_empty() { return 0; }
+    let Some(uint_ty) = module.types_global_values.iter().find_map(|i| {
+        (i.class.opcode == Op::TypeInt && i.operands == [Operand::LiteralBit32(32), Operand::LiteralBit32(0)])
+            .then_some(i.result_id).flatten()
+    }) else { return 0 };
+    let mut next_id = module.header.as_ref().map(|h| h.bound).unwrap_or(0);
+    let mut changed = 0;
+    for root in roots {
+        let ptr_ty = defs[&root].result_type.unwrap();
+        let (_, record_ty) = ptr_info(&defs, ptr_ty).unwrap();
+        let Some(stride) = module.annotations.iter().find_map(|i| match i.operands.as_slice() {
+            [Operand::IdRef(id), Operand::Decoration(spirv::Decoration::ArrayStride), Operand::LiteralBit32(stride)]
+                if i.class.opcode == Op::Decorate && *id == ptr_ty && *stride != 0 => Some(*stride),
+            _ => None,
+        }) else { continue };
+        let mut pending = vec![record_ty];
+        let mut visited = HashSet::default();
+        let mut fixed_size = true;
+        while let Some(ty) = pending.pop() {
+            if !visited.insert(ty) { continue; }
+            let Some(def) = defs.get(&ty) else { fixed_size = false; break };
+            if def.class.opcode == Op::TypeRuntimeArray { fixed_size = false; break; }
+            if def.class.opcode == Op::TypeStruct {
+                pending.extend(def.operands.iter().filter_map(operand_id));
+            } else if matches!(def.class.opcode, Op::TypeArray | Op::TypeMatrix | Op::TypeVector) {
+                pending.extend(def.operands.first().and_then(operand_id));
+            }
+        }
+        if !fixed_size { continue; }
+        let safe = module.functions.iter().flat_map(|f| &f.blocks).flat_map(|b| &b.instructions).all(|i| {
+            if !i.operands.iter().any(|o| operand_id(o) == Some(root)) { return true; }
+            let ptr_form = matches!(i.class.opcode, Op::PtrAccessChain | Op::InBoundsPtrAccessChain);
+            (ptr_form || matches!(i.class.opcode, Op::AccessChain | Op::InBoundsAccessChain))
+                && i.operands.first() == Some(&Operand::IdRef(root))
+                && i.operands.len() > if ptr_form { 2 } else { 1 }
+                && !i.operands[1..].iter().any(|o| operand_id(o) == Some(root))
+        });
+        if !safe { continue; }
+        let zero = get_or_create_integer_constant(module, &mut defs, &mut next_id, uint_ty, 0);
+        let elem = next_id;
+        let array = next_id + 1;
+        let block = next_id + 2;
+        let pointer = next_id + 3;
+        next_id += 4;
+        let mut element = defs[&record_ty].clone();
+        element.result_id = Some(elem);
+        let types = [
+            element,
+            Instruction::new(Op::TypeRuntimeArray, None, Some(array), vec![Operand::IdRef(elem)]),
+            Instruction::new(Op::TypeStruct, None, Some(block), vec![Operand::IdRef(array)]),
+            Instruction::new(Op::TypePointer, None, Some(pointer), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(block)]),
+        ];
+        let position = module.types_global_values.iter().position(|i| i.result_id == Some(root)).unwrap();
+        module.types_global_values[position].result_type = Some(pointer);
+        module.types_global_values.splice(position..position, types);
+        let copied = module.annotations.iter().filter(|i| {
+            i.class.opcode == Op::MemberDecorate && i.operands.first() == Some(&Operand::IdRef(record_ty))
+        }).map(|i| {
+            let mut i = i.clone(); i.operands[0] = Operand::IdRef(elem); i
+        }).collect::<Vec<_>>();
+        module.annotations.extend(copied);
+        module.annotations.extend([
+            Instruction::new(Op::Decorate, None, None, vec![Operand::IdRef(array), Operand::Decoration(spirv::Decoration::ArrayStride), Operand::LiteralBit32(stride)]),
+            Instruction::new(Op::Decorate, None, None, vec![Operand::IdRef(block), Operand::Decoration(spirv::Decoration::Block)]),
+            Instruction::new(Op::MemberDecorate, None, None, vec![Operand::IdRef(block), Operand::LiteralBit32(0), Operand::Decoration(spirv::Decoration::Offset), Operand::LiteralBit32(0)]),
+        ]);
+        for i in module.functions.iter_mut().flat_map(|f| &mut f.blocks).flat_map(|b| &mut b.instructions) {
+            if i.operands.first() != Some(&Operand::IdRef(root)) { continue; }
+            if matches!(i.class.opcode, Op::PtrAccessChain | Op::InBoundsPtrAccessChain) {
+                // Keep the record index, inserting only the enclosing block's member zero.
+                i.class.opcode = Op::AccessChain;
+                i.operands.insert(1, Operand::IdRef(zero));
+            } else {
+                // A direct member access refers to record zero.
+                i.operands.splice(1..1, [Operand::IdRef(zero), Operand::IdRef(zero)]);
+            }
+        }
+        changed += 1;
+    }
+    if let Some(header) = module.header.as_mut() { header.bound = next_id; }
+    changed
+}
+
 pub(crate) fn lower_zero_base_storage_buffer_ptr_access_chains(module: &mut Module) -> usize {
     if !module
         .functions
@@ -1085,6 +1197,85 @@ mod tests {
         operands: Vec<Operand>,
     ) -> Instruction {
         Instruction::new(op, result_type, result_id, operands)
+    }
+
+    fn late_record_accesses() -> Module {
+        use spirv::Decoration as D;
+        let mut module = Module::new();
+        module.header = Some(ModuleHeader::new(40));
+        module.types_global_values = vec![
+            inst(Op::TypeInt, None, Some(1), vec![Operand::LiteralBit32(32), Operand::LiteralBit32(0)]),
+            inst(Op::TypeStruct, None, Some(2), vec![Operand::IdRef(1), Operand::IdRef(1)]),
+            inst(Op::TypePointer, None, Some(3), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(2)]),
+            inst(Op::Variable, Some(3), Some(4), vec![Operand::StorageClass(StorageClass::StorageBuffer)]),
+            inst(Op::TypePointer, None, Some(5), vec![Operand::StorageClass(StorageClass::StorageBuffer), Operand::IdRef(1)]),
+            inst(Op::Constant, Some(1), Some(6), vec![Operand::LiteralBit32(0)]),
+            inst(Op::Constant, Some(1), Some(7), vec![Operand::LiteralBit32(1)]),
+            inst(Op::Undef, Some(1), Some(8), vec![]),
+            inst(Op::Variable, Some(3), Some(9), vec![Operand::StorageClass(StorageClass::StorageBuffer)]),
+        ];
+        module.annotations = vec![
+            inst(Op::Decorate, None, None, vec![Operand::IdRef(2), Operand::Decoration(D::Block)]),
+            inst(Op::Decorate, None, None, vec![Operand::IdRef(3), Operand::Decoration(D::ArrayStride), Operand::LiteralBit32(32)]),
+            inst(Op::MemberDecorate, None, None, vec![Operand::IdRef(2), Operand::LiteralBit32(0), Operand::Decoration(D::Offset), Operand::LiteralBit32(0)]),
+            inst(Op::MemberDecorate, None, None, vec![Operand::IdRef(2), Operand::LiteralBit32(1), Operand::Decoration(D::Offset), Operand::LiteralBit32(12)]),
+            inst(Op::MemberDecorate, None, None, vec![Operand::IdRef(2), Operand::LiteralBit32(1), Operand::Decoration(D::NonWritable)]),
+        ];
+        let mut block = Block::new();
+        block.instructions = vec![
+            inst(Op::PtrAccessChain, Some(5), Some(20), vec![Operand::IdRef(4), Operand::IdRef(8), Operand::IdRef(7)]),
+            inst(Op::InBoundsAccessChain, Some(5), Some(21), vec![Operand::IdRef(4), Operand::IdRef(6)]),
+            inst(Op::InBoundsPtrAccessChain, Some(5), Some(22), vec![Operand::IdRef(4), Operand::IdRef(6), Operand::IdRef(7)]),
+            inst(Op::AccessChain, Some(5), Some(23), vec![Operand::IdRef(9), Operand::IdRef(7)]),
+        ];
+        let mut function = Function::new(); function.blocks.push(block);
+        module.functions.push(function);
+        module
+    }
+
+    #[test]
+    fn late_record_arrays_preserve_indices_stride_members_and_other_descriptors() {
+        let mut module = late_record_accesses();
+        let original_other = module.functions[0].blocks[0].instructions[3].clone();
+        assert_eq!(lower_storage_buffer_record_arrays(&mut module), 1);
+        let defs = collect_defs(&module);
+        let (_, wrapper) = value_pointer_info(&defs, 4).unwrap();
+        let array = operand_id(&defs[&wrapper].operands[0]).unwrap();
+        let record = operand_id(&defs[&array].operands[0]).unwrap();
+        assert_eq!(defs[&array].class.opcode, Op::TypeRuntimeArray);
+        assert_eq!(defs[&record].operands, defs[&2].operands);
+        assert_eq!(value_pointer_info(&defs, 9), Some((StorageClass::StorageBuffer, 2)));
+        let instructions = &module.functions[0].blocks[0].instructions;
+        for (i, indices) in [(0, vec![4, 6, 8, 7]), (1, vec![4, 6, 6, 6]), (2, vec![4, 6, 6, 7])] {
+            assert_eq!(instructions[i].operands, indices.into_iter().map(Operand::IdRef).collect::<Vec<_>>());
+            assert!(matches!(instructions[i].class.opcode, Op::AccessChain | Op::InBoundsAccessChain));
+        }
+        assert_eq!(instructions[3], original_other);
+        assert!(module.annotations.iter().any(|i| i.operands == [Operand::IdRef(array), Operand::Decoration(spirv::Decoration::ArrayStride), Operand::LiteralBit32(32)]));
+        for i in module.annotations.iter().filter(|i| i.class.opcode == Op::MemberDecorate && i.operands[0] == Operand::IdRef(2)) {
+            let mut expected = i.clone(); expected.operands[0] = Operand::IdRef(record);
+            assert!(module.annotations.contains(&expected));
+        }
+        assert_eq!(lower_storage_buffer_record_arrays(&mut module), 0);
+    }
+
+    #[test]
+    fn late_record_arrays_decline_unproven_uses_and_variable_sized_records() {
+        for case in 0..4 {
+            let mut module = late_record_accesses();
+            match case {
+                0 => module.functions[0].blocks[0].instructions.push(inst(Op::CopyObject, Some(3), Some(24), vec![Operand::IdRef(4)])),
+                1 => module.functions[0].blocks[0].instructions[0].operands.pop().map(|_| ()).unwrap(),
+                2 => {
+                    module.types_global_values.insert(1, inst(Op::TypeRuntimeArray, None, Some(10), vec![Operand::IdRef(1)]));
+                    module.types_global_values[2].operands[1] = Operand::IdRef(10);
+                }
+                _ => module.annotations.retain(|i| i.operands.get(1) != Some(&Operand::Decoration(spirv::Decoration::ArrayStride))),
+            }
+            let before = module.assemble();
+            assert_eq!(lower_storage_buffer_record_arrays(&mut module), 0, "case {case}");
+            assert_eq!(module.assemble(), before, "declined case {case} must not mutate");
+        }
     }
 
     fn mixed_width_pointer_walk(index_type: Word, delta_type: Word) -> Module {

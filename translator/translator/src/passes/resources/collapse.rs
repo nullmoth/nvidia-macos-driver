@@ -956,6 +956,7 @@ pub(in crate::passes) fn apply_bindings(
                 splices.push((pid, value));
             }
             ParamBinding::StageInAttribute {
+                index_buffer,
                 var,
                 value_ty,
                 index_var,
@@ -964,6 +965,7 @@ pub(in crate::passes) fn apply_bindings(
                 layout,
             } => {
                 let value = load_stage_in_attribute(
+                    index_buffer,
                     ctx, &mut loads, var, value_ty, index_var, dispatch_var, attribute, layout,
                 )?;
                 splices.push((pid, value));
@@ -2427,6 +2429,7 @@ mod tests {
 /// format lacks is 0, and a missing fourth lane is 1, as Metal fills a vertex-style fetch.
 #[allow(clippy::too_many_arguments)]
 fn load_stage_in_attribute(
+    index_buffer: Option<(Word, u32)>,
     ctx: &mut Ctx,
     loads: &mut Vec<Instruction>,
     var: Word,
@@ -2447,14 +2450,16 @@ fn load_stage_in_attribute(
     };
     let element = match layout.step {
         StageInStep::Constant => ctx.const_uint(0),
-        StageInStep::GridX | StageInStep::GridY => {
-            let axis = u32::from(layout.step == StageInStep::GridY);
+        StageInStep::GridX | StageInStep::GridY | StageInStep::GridXIndexed | StageInStep::GridYIndexed => {
+            let axis = u32::from(matches!(layout.step, StageInStep::GridY | StageInStep::GridYIndexed));
             let gid = emit(ctx, loads, Op::Load, v3u, vec![Operand::IdRef(index_var)]);
             let relative = emit(ctx, loads, Op::CompositeExtract, uint_ty, vec![Operand::IdRef(gid), Operand::LiteralBit32(axis)]);
             let absolute = match dispatch_var {
                 Some(dispatch) => {
                     let base = load_kernel_dispatch_component(ctx, loads, dispatch, 3 + axis);
-                    emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(relative), Operand::IdRef(base)])
+                    let dispatch_index=emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(relative), Operand::IdRef(base)]);
+                    let origin=load_kernel_dispatch_component(ctx,loads,dispatch,12+axis);
+                    emit(ctx, loads, Op::IAdd, uint_ty, vec![Operand::IdRef(dispatch_index), Operand::IdRef(origin)])
                 }
                 None => relative,
             };
@@ -2466,6 +2471,23 @@ fn load_stage_in_attribute(
             }
         }
     };
+    let element = if let Some((index_buffer,index_type)) = index_buffer {
+        let word_index = if index_type==0 {
+            let one=ctx.const_uint(1);
+            emit(ctx,loads,Op::ShiftRightLogical,uint_ty,vec![Operand::IdRef(element),Operand::IdRef(one)])
+        } else { element };
+        let ptr_ty=ctx.ty_ptr(StorageClass::StorageBuffer,uint_ty);
+        let zero=ctx.const_uint(0);
+        let ptr=emit(ctx,loads,Op::AccessChain,ptr_ty,vec![Operand::IdRef(index_buffer),Operand::IdRef(zero),Operand::IdRef(word_index)]);
+        let word=emit(ctx,loads,Op::Load,uint_ty,vec![Operand::IdRef(ptr)]);
+        if index_type==0 {
+            let one=ctx.const_uint(1);let sixteen=ctx.const_uint(16);let mask=ctx.const_uint(65535);
+            let low=emit(ctx,loads,Op::BitwiseAnd,uint_ty,vec![Operand::IdRef(element),Operand::IdRef(one)]);
+            let shift=emit(ctx,loads,Op::IMul,uint_ty,vec![Operand::IdRef(low),Operand::IdRef(sixteen)]);
+            let shifted=emit(ctx,loads,Op::ShiftRightLogical,uint_ty,vec![Operand::IdRef(word),Operand::IdRef(shift)]);
+            emit(ctx,loads,Op::BitwiseAnd,uint_ty,vec![Operand::IdRef(shifted),Operand::IdRef(mask)])
+        } else { word }
+    } else { element };
     let stride_words = ctx.const_uint(layout.stride / 4);
     let scaled = emit(ctx, loads, Op::IMul, uint_ty, vec![Operand::IdRef(element), Operand::IdRef(stride_words)]);
     let offset_words = ctx.const_uint(attribute.offset / 4);

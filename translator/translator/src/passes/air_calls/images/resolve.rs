@@ -800,6 +800,8 @@ mod tests {
             ("air.get_height_texture_cube", (Dim::DimCube, false)),
             ("air.get_depth_texture_3d", (Dim::Dim3D, false)),
             ("air.get_array_size_texture_2d_array", (Dim::Dim2D, true)),
+            ("air.get_array_size_depth_2d_array", (Dim::Dim2D, true)),
+            ("air.get_array_size_depth_cube_array", (Dim::DimCube, true)),
             (
                 "air.get_num_mip_levels_texture_cube_array",
                 (Dim::DimCube, true),

@@ -189,6 +189,7 @@ static void nvmtl_conf_read_file(unsigned forgot)
 // Which profile keys the user set: in this process's kept environment before the conf file was read (bit i = knob i),
 // or in the user's block of the conf file.
 typedef struct { const nvmtl_app_profile *p; uint64_t envBits; } nvmtl_profile_ctx;
+static nvmtl_profile_ctx g_app_profile_ctx;
 static int nvmtl_profile_user_set(const char *key, void *vctx)
 {
     const nvmtl_profile_ctx *c = vctx;
@@ -196,6 +197,27 @@ static int nvmtl_profile_user_set(const char *key, void *vctx)
         if (!strcmp(c->p->knobs[i].key, key)) { if ((c->envBits >> i) & 1) return 1; break; }
     for (unsigned i = 0; i < g_conf_nmine; i++) if (!strcmp(g_conf_mine[i], key)) return 1;
     return 0;
+}
+
+// Backend-specific profile settings settle exactly once, immediately before the first AIR translation, from the
+// application's authoritative selection query. Settling before the translator opens also makes its AIR and SPIR-V
+// cache identities describe the selected mode.
+static void nvmtl_app_profile_settle_backend(nvmtl_app_backend backend)
+{
+    const nvmtl_app_profile *p = g_app_profile;
+    const unsigned deferred = nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_METAL)
+                            + nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_OPENGL);
+    if (!p || !deferred || backend == NVMTL_APP_BACKEND_ANY) return;
+    char rec[3072]; const char *had = getenv("NVMTL_CONF_SET");
+    snprintf(rec, sizeof rec, "%s", had ? had : "");
+    unsigned kept = 0;
+    const unsigned set = nvmtl_app_profile_apply_backend(p, backend, nvmtl_profile_user_set,
+                                                         &g_app_profile_ctx, rec, sizeof rec, &kept);
+    if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
+    const unsigned selected = nvmtl_app_profile_knob_count(p, backend);
+    const char *name = backend == NVMTL_APP_BACKEND_OPENGL ? "OpenGL" : "Metal";
+    nvlog("profile: %s: %s backend: %u setting(s) applied, %u left as the user set them, %u for the other backend skipped",
+          p->exe, name, set, kept, deferred - selected);
 }
 // NVMTL_OS_VERSION=<major>[.<minor>[.<patch>]]: this process is told the operating system is at least that version
 // ("0" = never, even for a profile). The application profile can carry a version too (nvmtl_app_profile.h): Cyberpunk
@@ -229,16 +251,21 @@ static void nvmtl_conf_settle(void)
     done = 1;
     unsigned forgot = nvmtl_conf_forget_inherited();
     const char *me = getprogname();
-    // The main bundle's identifier; a process outside any bundle has none and gets no profile.
-    char bid[256] = "";
+    // Use the release version, not CFBundleVersion (Blender 3.6 uses a build date there). Missing, non-string or
+    // oversized metadata stays empty, so it cannot match a version-restricted profile. No bundle means no profile.
+    char bid[256] = "", app_version[64] = "";
     { CFBundleRef mb = CFBundleGetMainBundle(); CFStringRef s = mb ? CFBundleGetIdentifier(mb) : NULL;
-      if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0; }
-    const nvmtl_app_profile *p = nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"));
+      if (s && !CFStringGetCString(s, bid, sizeof bid, kCFStringEncodingUTF8)) bid[0] = 0;
+      CFTypeRef v = mb ? CFBundleGetValueForInfoDictionaryKey(mb, CFSTR("CFBundleShortVersionString")) : NULL;
+      if (v && CFGetTypeID(v) == CFStringGetTypeID()
+          && !CFStringGetCString((CFStringRef)v, app_version, sizeof app_version, kCFStringEncodingUTF8)) app_version[0] = 0; }
+    const nvmtl_app_profile *p = nvmtl_app_profile_for_version(me, bid, app_version,
+                                                               getenv("NVMTL_APP_PROFILE"));
     nvmtl_profile_ctx ctx = { p, 0 };
     for (unsigned i = 0; p && i < p->nknobs && i < 64; i++) if (getenv(p->knobs[i].key)) ctx.envBits |= 1ull << i;
     nvmtl_conf_read_file(forgot);
     nvmtl_os_version_override(me, bid);
-    if (p && !nvmtl_app_profile_for(me, bid, getenv("NVMTL_APP_PROFILE"))) {
+    if (p && !nvmtl_app_profile_for_version(me, bid, app_version, getenv("NVMTL_APP_PROFILE"))) {
         nvlog("profile: %s: off (NVMTL_APP_PROFILE=0)", me);
         p = NULL;
     }
@@ -271,9 +298,13 @@ static void nvmtl_conf_settle(void)
         }
     }
     if (rec[0]) setenv("NVMTL_CONF_SET", rec, 1);
+    g_app_profile_ctx = ctx;
     g_app_profile = p;
-    nvlog("profile: %s (%s): %u setting(s) applied, %u left as the user set them%s; shader cache %s", me, bid, set, kept,
-          p->shader_from ? "; one kernel edit armed" : "", air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
+    const unsigned deferred = nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_METAL)
+                            + nvmtl_app_profile_knob_count(p, NVMTL_APP_BACKEND_OPENGL);
+    nvlog("profile: %s (%s): %u common setting(s) applied, %u left as the user set them, %u backend setting(s) deferred%s; shader cache %s",
+          me, bid, set, kept, deferred, p->shader_from ? "; one kernel edit armed" : "",
+          air[0] ? air : (getenv("NVMTL_AIRCACHE") ?: "shared"));
 }
 __attribute__((constructor)) static void nvmtl_conf_knobs(void) { nvmtl_conf_settle(); }
 static int nvmtl_dontcare_clears(void) {
@@ -4376,8 +4407,8 @@ static MTLPixelFormat nvmtl_swizzle_twin_mtl(MTLPixelFormat f) { return (MTLPixe
         _begun = YES; [self nvmtlBeginVisibility]; _passFmt = p->_p.cfmt; _passDepth = p->_p.has_depth; _passSamples = p->_p.samples; nvmtl_vk_pipeline_sig(&p->_p, &_passSig);
         if (_resolve) { NVMTLTexture *rs = _resolve->_parent ? _resolve->_parent : _resolve; if (rs->_surf) nvmtl_surf_dirty(_cb, rs); }
         nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
-        if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
-        if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
+        if (_vpCount) nvmtl_vk_cmd_set_viewports(&_cb->_c, _vp, _vpCount);
+        if (_scCount) nvmtl_vk_cmd_set_scissors(&_cb->_c, _sc, _scCount);
         [self nvmtlApplyDepthStencil];
     } else if (!nvmtl_vk_pipeline_compatible(&_passSig, &p->_p)) {
         static int said; if (said++ < 8) nvlog("G12 setRenderPipelineState: pipeline (fmt %u depth %d) does NOT match the pass in progress "
@@ -4711,18 +4742,26 @@ static NVMTLBuffer *nvmtl_bytes_ring(NVMTLCommandBuffer *cb, NSUInteger len, siz
     else if (_target)
         nvlog("encoder: clear-only pass (%.2f %.2f %.2f %.2f)", _clear[0], _clear[1], _clear[2], _clear[3]);
 }
-- (void)setViewport:(MTLViewport)v {
-    nvtrace("VP %.4g %.4g %.4g %.4g z %.3g %.3g", v.originX, v.originY, v.width, v.height, v.znear, v.zfar);
-    _vp[0] = (float)v.originX; _vp[1] = (float)v.originY; _vp[2] = (float)v.width; _vp[3] = (float)v.height; _vp[4] = (float)v.znear; _vp[5] = (float)v.zfar; _hasVP = YES;
-    if (_begun) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
+- (void)setViewport:(MTLViewport)v { [self setViewports:&v count:1]; }
+- (void)setViewports:(const MTLViewport *)v count:(NSUInteger)n {
+    if (!v || !n || n > NVMTL_MAX_VIEWPORTS) { nvlog("encoder: invalid viewport count %lu", (unsigned long)n); return; }
+    for (NSUInteger i = 0; i < n; i++) {
+        nvtrace("VP %.4g %.4g %.4g %.4g z %.3g %.3g", v[i].originX, v[i].originY, v[i].width, v[i].height, v[i].znear, v[i].zfar);
+        _vp[i] = (nvk_viewport){ (float)v[i].originX, (float)v[i].originY, (float)v[i].width,
+            (float)v[i].height, (float)v[i].znear, (float)v[i].zfar };
+    }
+    _vpCount = (uint32_t)n;
+    if (_begun) nvmtl_vk_cmd_set_viewports(&_cb->_c, _vp, _vpCount);
 }
-- (void)setViewports:(const MTLViewport *)v count:(NSUInteger)n { if (v && n) [self setViewport:v[0]]; }
-- (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)n { if (r && n) [self setScissorRect:r[0]]; }
-- (void)setScissorRect:(MTLScissorRect)r {
-    nvtrace("SC %lu %lu %lu %lu", (unsigned long)r.x, (unsigned long)r.y, (unsigned long)r.width, (unsigned long)r.height);
-    _sc[0] = (uint32_t)r.x; _sc[1] = (uint32_t)r.y; _sc[2] = (uint32_t)r.width; _sc[3] = (uint32_t)r.height; _hasSC = YES;
-    if (!_begun) return;
-    nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)r.x, (int32_t)r.y, (uint32_t)r.width, (uint32_t)r.height);
+- (void)setScissorRect:(MTLScissorRect)r { [self setScissorRects:&r count:1]; }
+- (void)setScissorRects:(const MTLScissorRect *)r count:(NSUInteger)n {
+    if (!r || !n || n > NVMTL_MAX_VIEWPORTS) { nvlog("encoder: invalid scissor count %lu", (unsigned long)n); return; }
+    for (NSUInteger i = 0; i < n; i++) {
+        nvtrace("SC %lu %lu %lu %lu", (unsigned long)r[i].x, (unsigned long)r[i].y, (unsigned long)r[i].width, (unsigned long)r[i].height);
+        _sc[i] = (nvk_scissor){ (int32_t)r[i].x, (int32_t)r[i].y, (uint32_t)r[i].width, (uint32_t)r[i].height };
+    }
+    _scCount = (uint32_t)n;
+    if (_begun) nvmtl_vk_cmd_set_scissors(&_cb->_c, _sc, _scCount);
 }
 - (void)setCullMode:(MTLCullMode)mode {
     _cull = (_cull & 4) | (mode == MTLCullModeFront ? 1 : mode == MTLCullModeBack ? 2 : 0);
@@ -5254,8 +5293,8 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     if (![self nvmtlBeginPassLoad:NVMTL_LOAD_ALL]) {
         _begun = NO; nvlog("mesh: render pass could not RESUME after the mesh stage - the rest of this encoder is not drawn"); return NO; }
     nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
-    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
-    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
+    if (_vpCount) nvmtl_vk_cmd_set_viewports(&_cb->_c, _vp, _vpCount);
+    if (_scCount) nvmtl_vk_cmd_set_scissors(&_cb->_c, _sc, _scCount);
     [self nvmtlApplyDepthStencil];
     return YES;
 }
@@ -5316,8 +5355,8 @@ NVMTL_MESH_BINDERS(Object, YES, NO)
     if (![self nvmtlBeginPassLoad:NVMTL_LOAD_ALL]) {
         _begun = NO; nvlog("mesh: render pass could not RESUME after the mesh stage - the rest of this encoder is not drawn"); return; }
     nvmtl_vk_cmd_set_cull(&_cb->_c, _cull);
-    if (_hasVP) nvmtl_vk_cmd_set_viewport(&_cb->_c, _vp[0], _vp[1], _vp[2], _vp[3], _vp[4], _vp[5]);
-    if (_hasSC) nvmtl_vk_cmd_set_scissor(&_cb->_c, (int32_t)_sc[0], (int32_t)_sc[1], _sc[2], _sc[3]);
+    if (_vpCount) nvmtl_vk_cmd_set_viewports(&_cb->_c, _vp, _vpCount);
+    if (_scCount) nvmtl_vk_cmd_set_scissors(&_cb->_c, _sc, _scCount);
     [self nvmtlApplyDepthStencil];
     MTLPrimitiveType pt = mi->_lay[2] == 3 ? MTLPrimitiveTypeTriangle : mi->_lay[2] == 2 ? MTLPrimitiveTypeLine : MTLPrimitiveTypePoint;
     static int told; if (told++ < 4) nvlog("mesh: \"%s\" %llu threadgroup(s) x %ux%ux%u -> %llu B scratch, %llu vertices", mi->_name.UTF8String,
@@ -5679,7 +5718,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     uint32_t vkf = 0, bpp = 0; int a8 = 0;
     if (nvmtl_pixfmt_public(d.pixelFormat, &vkf, &bpp, &a8)) return nil;
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
-    int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    int wantStex = nvmtl_optimal_storage_requested(d, vkf, a8);
     if (nvmtl_vk_image_create_typed_placed((uint32_t)d.width, (uint32_t)d.height, vkf, bpp, a8, (uint32_t)d.mipmapLevelCount, wantStex,
                                             (uint32_t)d.textureType, nvmtl_vk_layers_for_desc((uint32_t)d.textureType, (uint32_t)d.arrayLength, (uint32_t)d.depth), &_hm, off, &t->_i)) {
         nvlog("heap newTextureWithDescriptor: %lux%lu offset:%lu FAILED", (unsigned long)d.width, (unsigned long)d.height, (unsigned long)off); return nil; }
@@ -5773,7 +5812,7 @@ void nvmtl_heap_back(NVMTLHeap *h, NSUInteger size, int shared) {
     const BOOL rbSwapPl = nvmtl_bgr10_storage_remap(d, &vkf);
     const uint32_t w = (uint32_t)d.width, hh = (uint32_t)d.height, mips = (uint32_t)(d.mipmapLevelCount ? d.mipmapLevelCount : 1);
     const uint32_t type = (uint32_t)d.textureType, layers = nvmtl_vk_layers_for_desc(type, (uint32_t)d.arrayLength, (uint32_t)d.depth);
-    const int wantStex = (d.usage & MTLTextureUsageShaderWrite) != 0;
+    const int wantStex = nvmtl_optimal_storage_requested(d, vkf, a8);
     const uint32_t key[12] = { 1, w, hh, vkf, bpp, (uint32_t)a8, mips, (uint32_t)wantStex, type, layers, 0, 0 };
     NVMTLTexture *t = [NVMTLTexture new];
     NSUInteger off = 0, len = charge; BOOL rec = NO;
@@ -5969,7 +6008,7 @@ static NSUInteger nvmtl_compute_maxt(void) { static NSUInteger v; if (!v) v = nv
 - (void)setThreadgroupMemoryLength:(NSUInteger)len atIndex:(NSUInteger)i {
     if (len) nvlog("indirect command setThreadgroupMemoryLength:%lu — dynamic threadgroup memory is not wired; IGNORED", (unsigned long)len);
 }
-- (void)setStageInRegion:(MTLRegion)r {}
+- (void)setStageInRegion:(MTLRegion)r { _stageInRegion = r; }
 - (void)setCullMode:(MTLCullMode)m { _cull = m; _hasCull = YES; }
 - (void)setFrontFacingWinding:(MTLWinding)w { _winding = w; _hasWinding = YES; }
 - (void)setTriangleFillMode:(MTLTriangleFillMode)f { _fill = f; _hasFill = YES; }
@@ -5984,11 +6023,13 @@ static NSUInteger nvmtl_compute_maxt(void) { static NSUInteger v; if (!v) v = nv
     _cull = o->_cull; _hasCull = o->_hasCull; _winding = o->_winding; _hasWinding = o->_hasWinding; _fill = o->_fill; _hasFill = o->_hasFill;
     _clip = o->_clip; _hasClip = o->_hasClip; _ds = o->_ds; _bias = o->_bias; _slope = o->_slope; _clamp = o->_clamp; _hasBias = o->_hasBias;
     _cps = o->_cps; _kbufs = [o->_kbufs mutableCopy]; _grid = o->_grid; _tg = o->_tg; _isCompute = o->_isCompute;
+    _stageInRegion = o->_stageInRegion;
 }
 - (void)reset {
     _ps = nil; [_vbufs removeAllObjects]; [_fbufs removeAllObjects]; _ibuf = nil; _armed = NO;
     _hasCull = _hasWinding = _hasFill = _hasClip = _hasBias = NO; _ds = nil;
     _cps = nil; [_kbufs removeAllObjects]; _isCompute = NO;
+    _stageInRegion = MTLRegionMake3D(0, 0, 0, 0, 0, 0);
 }
 @end
 
@@ -6504,6 +6545,47 @@ static int nvmtl_misaligned_copy_on(void) {
     return on;
 }
 @implementation NVMTLComputeCommandEncoder
+- (void)setStageInRegion:(MTLRegion)r {
+    _stageInRegion = r;
+    _stageInIndirect = nil;
+}
+- (void)setStageInRegionWithIndirectBuffer:(id<MTLBuffer>)buffer indirectBufferOffset:(NSUInteger)offset {
+    _stageInIndirect = (NVMTLBuffer *)buffer;
+    _stageInIndirectOffset = offset;
+    nvmtl_retain_resource(_cb, buffer);
+}
+- (BOOL)nvmtlApplyStageInRegion {
+    memset(_cb->_c.stage_in_region, 0, sizeof _cb->_c.stage_in_region);
+    NVMTLFunction *fn = _ps->_function;
+    // Ordinary kernels need no region record. Keep this optional ABI off their dispatch path.
+    if (!fn || (!fn->_kernelStageIn.length && ![fn->_air containsString:@"air.stage_in"])) return YES;
+    NVMTLBuffer *record = _stageInIndirect;
+    size_t offset = _stageInIndirectOffset;
+    if (record) {
+        if ((offset & 3) || offset > record->_b.size || record->_b.size - offset < 24) {
+            nvlog("compute stage-in: invalid indirect region buffer range - dispatch refused");
+            return NO;
+        }
+    } else {
+        MTLRegion r = _stageInRegion;
+        uint32_t words[6] = {(uint32_t)r.origin.x, (uint32_t)r.origin.y, (uint32_t)r.origin.z,
+                            (uint32_t)r.size.width, (uint32_t)r.size.height, (uint32_t)r.size.depth};
+        record = nvmtl_bytes_ring(_cb, sizeof words, &offset);
+        if (!record || !record->_b.map) {
+            nvlog("compute stage-in: region record allocation failed - dispatch refused");
+            return NO;
+        }
+        memcpy((uint8_t *)record->_b.map + offset, words, sizeof words);
+    }
+    [self useResource:record usage:MTLResourceUsageRead];
+    // Both direct and GPU-written regions use a GPU-readable record. Never read indirect data on
+    // the CPU: an earlier GPU command in this same command buffer may not have written it yet.
+    uint64_t address = nvmtl_vk_buffer_address(&record->_b);
+    if (!address) return NO;
+    address += offset;
+    memcpy(_cb->_c.stage_in_region, &address, sizeof address);
+    return YES;
+}
 - (unsigned long long)globalTraceObjectID { return nvmtl_global_trace_id(self); }
 static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said && st) { said = YES;
     nvlog("compute: attributeStride %lu dropped (dynamic strides not implemented) - buffer bound", (unsigned long)st); } }
@@ -6521,7 +6603,7 @@ static void nvmtl_stride_dropped(NSUInteger st) { static BOOL said; if (!said &&
         [self setSamplerState:s ? s[k] : nil lodMinClamp:lo ? lo[k] : 0.0f lodMaxClamp:hi ? hi[k] : FLT_MAX atIndex:r.location + k]; }
 - (MTLDispatchType)dispatchType { return _e78Concurrent ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial; }
 - (NVMTLComputePipelineState *)nvmtlSamplerPipeline {
-    if (!_ps) return nil;
+    if (!_ps || ![self nvmtlApplyStageInRegion]) return nil;
     NVMTLComputePipelineState *selected = _ps;
     if ((_samplers.count || _tgLen.count) && _e78VarSel && _e78VarFor == _ps && nvmtl_enc78_on(NVMTL_E78_H5)) {
         selected = _e78VarSel; nvmtl_enc78_count(E78C_VARHIT, 1);
@@ -6935,15 +7017,20 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
 - (void)executeCommandsInBuffer:(id<MTLIndirectCommandBuffer>)icb withRange:(NSRange)r {
     NVMTLIndirectCommandBuffer *b = (NVMTLIndirectCommandBuffer *)icb;
     if (!b) { nvlog("compute executeCommandsInBuffer: nil"); return; }
+    MTLRegion savedRegion = _stageInRegion;
+    NVMTLBuffer *savedIndirect = _stageInIndirect;
+    NSUInteger savedOffset = _stageInIndirectOffset;
     NSUInteger n = 0;
     for (NSUInteger i = r.location; i < r.location + r.length && i < b->_cmds.count; i++) {
         NVMTLIndirectCommand *c = b->_cmds[i];
         if (!c->_armed || !c->_isCompute) continue;
         if (c->_cps) [self setComputePipelineState:c->_cps];
+        [self setStageInRegion:c->_stageInRegion];
         for (NSArray *e in c->_kbufs) [self setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:[e[2] unsignedLongValue]];
         [self dispatchThreadgroups:c->_grid threadsPerThreadgroup:c->_tg];
         n++;
     }
+    _stageInRegion = savedRegion; _stageInIndirect = savedIndirect; _stageInIndirectOffset = savedOffset;
     if (b->_recBuf && r.length <= UINT32_MAX && r.location <= UINT32_MAX) [self nvmtlGpuIcb:b loc:(uint32_t)r.location len:(uint32_t)r.length range:nil offset:0];
     nvlog("compute executeCommandsInBuffer: replayed %lu of %lu slot(s)", (unsigned long)n, (unsigned long)r.length);
 }
@@ -6960,16 +7047,21 @@ static void nvmtl_tg_reshape(NVMTLComputePipelineState *ps, const uint32_t l[3],
     }
     nvmtl_retain_resource(_cb, sc); nvmtl_retain_resource(_cb, rb);
     if (nvmtl_vk_cmd_icb_mask(&_cb->_c, &sc->_b, &rb->_b, ioff, slots, NVMTL_ICB_ZERO_DISPATCH)) { nvlog("compute executeCommandsInBuffer:indirectBuffer: the range pass FAILED - nothing runs"); return; }
+    MTLRegion savedRegion = _stageInRegion;
+    NVMTLBuffer *savedIndirect = _stageInIndirect;
+    NSUInteger savedOffset = _stageInIndirectOffset;
     NSUInteger n = 0;
     for (uint32_t i = 0; i < slots; i++) {
         NVMTLIndirectCommand *c = b->_cmds[i];
         if (!c->_armed || !c->_isCompute) continue;
         if (c->_cps) [self setComputePipelineState:c->_cps];
+        [self setStageInRegion:c->_stageInRegion];
         for (NSArray *e in c->_kbufs) [self setBuffer:e[0] offset:[e[1] unsignedLongValue] atIndex:[e[2] unsignedLongValue]];
         [self dispatchThreadgroupsWithIndirectBuffer:sc indirectBufferOffset:(NSUInteger)i * NVMTL_ICB_RECORD_BYTES threadsPerThreadgroup:c->_tg];
         n++;
     }
     nvlog("compute executeCommandsInBuffer:indirectBuffer: %lu armed slot(s) of %u recorded as range-masked indirect dispatches", (unsigned long)n, slots);
+    _stageInRegion = savedRegion; _stageInIndirect = savedIndirect; _stageInIndirectOffset = savedOffset;
     if (b->_recBuf) [self nvmtlGpuIcb:b loc:0 len:0 range:rb offset:ioff];
 }
 - (void)setSamplerState:(id<MTLSamplerState>)ss atIndex:(NSUInteger)i {

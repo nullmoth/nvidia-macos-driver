@@ -130,6 +130,104 @@ declare <4 x i32> @air.atomic_fetch_max_explicit_texture_2d.i16.u.v4i32(ptr addr
 !4 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_name", !"texture2d<uint, read_write>", !"air.arg_name", !"image"}
 "#;
 
+
+#[test]
+fn texture_atomic_offset_preserves_array_layer_and_value() {
+    // The spatial offset and value have different widths. Check their actual
+    // dataflow, not just SPIR-V validity, which cannot detect a wrong texel.
+    let template = r#"define void @k(<2 x i32> %coord, ptr addrspace(1) %image) {
+ %old = call <4 x i32> @air.atomic_fetch_min_explicit_texture_2d_array.u.v4i32(ptr addrspace(1) %image, <2 x i32> %coord, i32 5, <2 x i32> <i32 1, i32 2>, <4 x i32> <i32 7, i32 0, i32 0, i32 0>, i32 0, i32 3)
+ ret void
+}
+declare <4 x i32> @air.atomic_fetch_min_explicit_texture_2d_array.u.v4i32(ptr addrspace(1), <2 x i32>, i32, <2 x i32>, <4 x i32>, i32, i32)
+!air.kernel = !{!0}
+!0 = !{ptr @k, !1, !2}
+!1 = !{}
+!2 = !{!3, !4}
+!3 = !{i32 0, !"air.thread_position_in_grid", !"air.arg_type_name", !"uint2", !"air.arg_name", !"coord"}
+!4 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.read_write", !"air.arg_type_name", !"texture2d_array<uint, read_write>", !"air.arg_name", !"image"}
+"#;
+    let id = |op: &Operand| match op {
+        Operand::IdRef(id) => *id,
+        _ => panic!("expected id: {op:?}"),
+    };
+    for (case, offset) in [
+        ("nonzero", Some("<i32 1, i32 2>")),
+        ("zero", Some("zeroinitializer")),
+        ("legacy", None),
+    ] {
+        let ll = match offset {
+            Some(offset) => template.replace("<i32 1, i32 2>", offset),
+            None => template
+                .replace(", <2 x i32> <i32 1, i32 2>", "")
+                .replace("<2 x i32>, i32, <2 x i32>, <4 x i32>",
+                         "<2 x i32>, i32, <4 x i32>"),
+        };
+        let tmp = std::env::temp_dir().join(format!(
+            "metal2vulkan_texture_atomic_offset_{}_{case}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let spv = crate::translate_sanitized_native(&ll, Stage::Kernel, &tmp)
+            .expect("translate array texture atomic");
+        tools::spirv_val_bytes(&spv, &tmp).expect("valid atomic image access");
+        let module = load_bytes(&spv).unwrap();
+        let defs: HashMap<_, _> = module.all_inst_iter()
+            .filter_map(|inst| inst.result_id.map(|id| (id, inst))).collect();
+        let literal = |value: Word| {
+            let inst = defs[&value];
+            assert_eq!(inst.class.opcode, Op::Constant);
+            match inst.operands[0] {
+                Operand::LiteralBit32(n) => n,
+                _ => panic!("expected 32-bit constant"),
+            }
+        };
+        let atomic = module.all_inst_iter().find(|i| i.class.opcode == Op::AtomicUMin).unwrap();
+        let texel = defs[&id(&atomic.operands[0])];
+        assert_eq!(texel.class.opcode, Op::ImageTexelPointer);
+        let coordinate = defs[&id(&texel.operands[1])];
+        assert_eq!(coordinate.class.opcode, Op::CompositeConstruct);
+        assert_eq!(coordinate.operands.len(), 3);
+        assert_eq!(literal(id(&coordinate.operands[2])), 5, "array layer must not be offset");
+        let x = defs[&id(&coordinate.operands[0])];
+        let y = defs[&id(&coordinate.operands[1])];
+        assert_eq!(x.class.opcode, Op::CompositeExtract);
+        assert_eq!(y.class.opcode, Op::CompositeExtract);
+        assert_eq!(x.operands[0], y.operands[0]);
+        assert_eq!(x.operands[1], Operand::LiteralBit32(0));
+        assert_eq!(y.operands[1], Operand::LiteralBit32(1));
+        let xy = defs[&id(&x.operands[0])];
+        if offset.is_some() {
+            assert_eq!(xy.class.opcode, Op::IAdd);
+            let delta = defs[&id(&xy.operands[1])];
+            let components: Vec<_> = if delta.class.opcode == Op::ConstantNull {
+                vec![0, 0]
+            } else {
+                assert_eq!(delta.class.opcode, Op::ConstantComposite);
+                delta.operands.iter().map(|v| literal(id(v))).collect()
+            };
+            assert_eq!(components, if case == "nonzero" { vec![1, 2] } else { vec![0, 0] });
+        } else {
+            assert_eq!(xy.class.opcode, Op::CompositeConstruct, "legacy xy is not offset");
+        }
+        let value = defs[&id(&atomic.operands[3])];
+        assert_eq!(value.class.opcode, Op::CompositeExtract);
+        assert_eq!(value.operands[1], Operand::LiteralBit32(0));
+        let value4 = defs[&id(&value.operands[0])];
+        assert_eq!(literal(id(&value4.operands[0])), 7, "atomic value must not come from offset");
+        let _ = std::fs::remove_dir_all(tmp);
+    }
+    let malformed = template
+        .replace("<2 x i32> <i32 1, i32 2>", "<3 x i32> <i32 1, i32 2, i32 3>")
+        .replace("<2 x i32>, i32, <2 x i32>, <4 x i32>",
+                 "<2 x i32>, i32, <3 x i32>, <4 x i32>");
+    let tmp = std::env::temp_dir().join(format!(
+        "metal2vulkan_texture_atomic_bad_offset_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    let error = crate::translate_sanitized_native(&malformed, Stage::Kernel, &tmp)
+        .expect_err("a three-lane offset must not be accepted for xy coordinates");
+    assert!(error.contains("coordinate and offset shapes differ"), "{error}");
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
 #[test]
 fn native_unsigned_texture_fetch_max_uses_scalar_atomic_image_format() {
     let tmp = std::env::temp_dir().join(format!(

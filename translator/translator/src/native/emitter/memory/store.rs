@@ -63,6 +63,36 @@ impl Emitter {
         instructions: &mut Vec<Instruction>,
     ) -> Result<(), String> {
         match ty {
+            LlType::Struct(fields) => {
+                for i in 0..fields.len() {
+                    let (offset, field) = self.raw_struct_member(fields, i as u64)?;
+                    let id = self.fresh();
+                    let field_ty = self.type_id(&field)?;
+                    instructions.push(Self::inst(Op::CompositeExtract, Some(field_ty), Some(id),
+                        vec![Operand::IdRef(value), Operand::LiteralBit32(i as u32)]));
+                    let mut part=raw.clone();
+                    part.const_off=part.const_off.checked_add(offset as i64).ok_or("raw aggregate offset overflow")?;
+                    let align=access_align.map(|a| if offset==0 {a} else {a.min(1u64 << offset.trailing_zeros())});
+                    self.emit_raw_store_unchecked(&field,id,&part,align,instructions)?;
+                }
+                Ok(())
+            }
+            LlType::Array(elem, count) => {
+                let elem=self.resolve_type(elem)?;
+                let (size,alignment)=self.raw_type_size_align(&elem)?;
+                let stride=round_up_u64(size,alignment);
+                let elem_ty=self.type_id(&elem)?;
+                for i in 0..*count {
+                    let id=self.fresh();
+                    instructions.push(Self::inst(Op::CompositeExtract,Some(elem_ty),Some(id),
+                        vec![Operand::IdRef(value),Operand::LiteralBit32(i)]));
+                    let offset=u64::from(i)*stride;
+                    let mut part=raw.clone();part.const_off=part.const_off.checked_add(offset as i64).ok_or("raw aggregate offset overflow")?;
+                    let align=access_align.map(|a| if offset==0 {a} else {a.min(1u64 << offset.trailing_zeros())});
+                    self.emit_raw_store_unchecked(&elem,id,&part,align,instructions)?;
+                }
+                Ok(())
+            }
             LlType::Vector(elem, lanes) => {
                 let elem = self.resolve_type(elem)?;
                 let (elem_size, _) = self.raw_type_size_align(&elem)?;

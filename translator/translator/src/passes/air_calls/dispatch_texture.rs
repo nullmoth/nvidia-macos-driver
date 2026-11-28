@@ -1398,7 +1398,10 @@ pub(in crate::passes) fn lower_image_size_query(
         _ => 2,
     };
     let ncomp = spatial + if arrayed { 1 } else { 0 };
-    let is_array_size_query = name.starts_with("air.get_array_size_texture");
+    // Depth arrays use the same layer-count component as color arrays; querying a shadow map
+    // (including Apple's OpenGL-generated AIR) must not fall through to the width component.
+    let is_array_size_query = name.starts_with("air.get_array_size_texture")
+        || name.starts_with("air.get_array_size_depth");
     if is_array_size_query && !arrayed {
         return Err(format!(
             "{name} used on non-array texture id {img} ({})",
